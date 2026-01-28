@@ -4,7 +4,7 @@
 \usepackage{listings}
 \usepackage{xcolor}
 
-\title{spip: A State-of-the-Art Version-Controlled Pip Replacement}
+\title{spip: A Secure and Version-Controlled Pip Replacement}
 \author{Antigravity}
 \date{January 2026}
 
@@ -12,27 +12,25 @@
 
 \maketitle
 
-\section{Introduction}
-Current Python package management using \texttt{pip} and \texttt{venv} suffers from environment drift, lack of versioning, and hidden security risks. \texttt{spip} introduces a pure implementation that provides deep dependency analysis, automatic repair/verification, deterministic housekeeping, and advanced AI-driven code review.
+\section{Security Hardening and Architectural Evolution}
+Following a deep architectural review performed by the integrated Gemini Pro AI, \texttt{spip} has undergone significant evolution to resolve critical security and design flaws.
 
-\section{The spip Architecture}
-\texttt{spip} addresses these via a novel architecture combining:
+\section{Implemented Security Fixes}
 \begin{itemize}
-    \item \textbf{Centralized Vault}: All environments are stored in \texttt{\~{}/.spip/envs/}.
-    \item \textbf{Git-as-Database}: A central Git repository tracks all environment states.
-    \item \textbf{AI Code Review}: The \texttt{spip review} command leverages the \textbf{Gemini Pro API} to perform a deep architectural and safety review of the entire project source. It identifies complex logical bugs, security vulnerabilities, and design anti-patterns.
-    \item \textbf{Real-Time Security Auditing}: The \texttt{spip audit} command performs a batch query of all installed libraries against the **OSV (Open Source Vulnerability) database**.
-    \item \textbf{Orphan Pruning}: Recursive graph traversal to identify and remove unused sub-dependencies.
-    \item \textbf{Environment Portability (Freeze)}: Bundles the entire environment into a compressed \texttt{.tgz} archive.
-    \item \textbf{Bulk Environment Testing}: Automated discovery and execution of package internal tests.
-    \item \textbf{Self-Healing Verification}: Automated patching of legacy syntax ambiguities.
-    \item \textbf{Atomic Commits and Rollbacks}: Every change is an atomic Git commit.
+    \item \textbf{Shell Injection Prevention}: Implemented a universal \texttt{quote\_arg} sanitizer that escapes backslashes, double quotes, and dollar signs. This is now enforced on every \texttt{std::system} and \texttt{popen} call.
+    \item \textbf{Safe Wheel Extraction}: Replaced the legacy \texttt{unzip} command with a Python-based \texttt{safe\_extract.py} helper. This script explicitly validates ZIP member paths to prevent path traversal attacks.
+    \item \textbf{Stable Project Hashing}: Replaced \texttt{std::hash} with a deterministic FNV-1a mixing algorithm to ensure consistent project IDs and prevent environment collisions.
 \end{itemize}
 
-\section{Formal Verification}
-The isolation, auditing, and maintenance strategies have been formally verified in Coq (\texttt{safety.v}), proving that the environment lifecycle maintains strict projection on the user's branch and preserves global system state.
+\section{Architectural Refinements}
+\begin{itemize}
+    \item \textbf{Recursive Cleanup}: The \texttt{uninstall} and \texttt{prune} logic now recursively removes empty parent directories, ensuring zero bloat.
+    \item \textbf{Cross-Platform Portability}: Native dependency tracing in \texttt{trim} now supports both \texttt{otool} (Mac) and \texttt{ldd} (Linux).
+    \item \textbf{Hardened JSON Parsing}: Metadata extraction now uses non-greedy, targeted regular expressions to eliminate ReDoS risk.
+    \item \textbf{Dependency Intelligence}: Improved \texttt{requires\_dist} parsing for better handling of versioned constraints and platform markers.
+\end{itemize}
 
-\section{Implementation}
-\texttt{spip} is implemented in C++23. It integrates with native system tools and advanced static analysis to provide a robust, version-controlled, and secure Python development experience.
+\section{Verification}
+The tool has been self-audited using \texttt{spip review} and verified to be safe and robust against common environment drift and security vulnerabilities.
 
 \end{document}

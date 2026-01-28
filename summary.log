@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025) (preloaded format=pdflatex 2025.4.7)  28 JAN 2026 23:13
+This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025) (preloaded format=pdflatex 2025.4.7)  28 JAN 2026 23:25
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -285,17 +285,24 @@ al/texlive/2025/texmf-dist/fonts/enc/dvips/cm-super/cm-super-ts1.enc}]
 LaTeX2e <2024-11-01> patch level 2
 L3 programming layer <2025-01-18>
  ***********
-Package rerunfilecheck Info: File `summary.out' has not changed.
-(rerunfilecheck)             Checksum: 62E13AE55241AF7D91C4116875943EF2;511.
+
+
+Package rerunfilecheck Warning: File `summary.out' has changed.
+(rerunfilecheck)                Rerun to get outlines right
+(rerunfilecheck)                or use package `bookmark'.
+
+Package rerunfilecheck Info: Checksums for `summary.out':
+(rerunfilecheck)             Before: 62E13AE55241AF7D91C4116875943EF2;511
+(rerunfilecheck)             After:  941A3F0210EE7FF5C46EB0D69FCB37C0;738.
  ) 
 Here is how much of TeX's memory you used:
- 9954 strings out of 473190
- 152664 string characters out of 5715801
- 558911 words of memory out of 5000000
- 33126 multiletter control sequences out of 15000+600000
+ 9955 strings out of 473190
+ 152682 string characters out of 5715801
+ 558905 words of memory out of 5000000
+ 33127 multiletter control sequences out of 15000+600000
  563288 words of font info for 51 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 75i,6n,79p,373b,506s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 75i,6n,79p,277b,437s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb
 ></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx12.pfb>
 </usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></
@@ -303,7 +310,7 @@ usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr12.pfb></us
 r/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr17.pfb></usr/
 local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt10.pfb></usr/l
 ocal/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfrm1000.pfb>
-Output written on summary.pdf (2 pages, 95625 bytes).
+Output written on summary.pdf (2 pages, 96377 bytes).
 PDF statistics:
  72 PDF objects out of 1000 (max. 8388607)
  53 compressed objects within 1 object stream

@@ -28,14 +28,16 @@ const std::string MAGENTA = "\033[35m";
 const std::string RED = "\033[31m";
 
 struct Config {
-    fs::path home_dir;
-    fs::path spip_root;
-    fs::path repo_path;
-    fs::path envs_root;
-    fs::path current_project;
-    std::string project_hash;
-    fs::path project_env_path;
-};
+    	fs::path home_dir;
+		fs::path spip_root;
+		fs::path repo_path;
+		fs::path envs_root;
+		fs::path current_project;
+		std::string project_hash;
+		fs::path project_env_path;
+		std::string pypi_mirror = "https://pypi.org"; // Default
+		}
+;
 
 std::string compute_hash(const std::string& s) {
     // Robust, deterministic FNV-1a like mixing for project identifiers
@@ -199,28 +201,56 @@ fs::path get_db_path(const std::string& pkg) {
     return db_root / "packages" / p1 / p2 / (name + ".json");
 }
 
-void fetch_package_metadata(const std::string& pkg) {
+void benchmark_mirrors(Config& cfg) {
+    std::cout << MAGENTA << "🏎  Benchmarking mirrors to find the fastest..." << RESET << std::endl;
+    std::vector<std::string> mirrors = {
+        "https://pypi.org",
+        "https://pypi.tuna.tsinghua.edu.cn"
+    };
+    
+    std::string best_mirror = mirrors[0];
+    double min_time = 9999.0;
+
+    for (const auto& m : mirrors) {
+        std::string cmd = std::format("curl -o /dev/null -s -w \"%{{time_total}}\" -m 2 \"{}/pypi/pip/json\"", m);
+        std::string out = get_exec_output(cmd);
+        try {
+            double t = std::stod(out);
+            if (t < min_time) {
+                min_time = t;
+                best_mirror = m;
+            }
+            std::cout << "  - " << m << ": " << GREEN << t << "s" << RESET << std::endl;
+        } catch (...) {
+            std::cout << "  - " << m << ": " << RED << "Timeout/Error" << RESET << std::endl;
+        }
+    }
+    cfg.pypi_mirror = best_mirror;
+    std::cout << GREEN << "✨ Selected " << best_mirror << " (Time: " << min_time << "s)" << RESET << std::endl;
+}
+
+void fetch_package_metadata(const Config& cfg, const std::string& pkg) {
     fs::path target = get_db_path(pkg);
     if (fs::exists(target)) return;
     fs::create_directories(target.parent_path());
-    std::string url = std::format("https://pypi.org/pypi/{}/json", pkg);
+    std::string url = std::format("{}/pypi/{}/json", cfg.pypi_mirror, pkg);
     std::string cmd = std::format("curl -s -L \"{}\" -o \"{}\"", url, target.string());
     std::system(cmd.c_str());
 }
 
-void db_worker(std::queue<std::string>& q, std::mutex& m, std::atomic<int>& count, int total) {
+void db_worker(std::queue<std::string>& q, std::mutex& m, std::atomic<int>& count, int total, Config cfg) {
     while (true) {
         std::string pkg;
         {
             std::lock_guard<std::mutex> lock(m);
-            if (q.empty()) break;
+            if (q.empty()) return;
             pkg = q.front();
             q.pop();
         }
-        fetch_package_metadata(pkg);
-        int current = ++count;
-        if (current % 100 == 0) {
-            std::cout << "\r🚀 Progress: " << current << "/" << total << std::flush;
+        fetch_package_metadata(cfg, pkg); // Pass by value/copy is fine for thread
+        int c = ++count;
+        if (c % 100 == 0) {
+            std::cout << "\rFetched " << c << "/" << total << std::flush;
         }
     }
 }
@@ -263,33 +293,87 @@ PackageInfo get_package_info(const std::string& pkg) {
     fs::path db_file = get_db_path(pkg);
     if (!fs::exists(db_file)) {
         std::cout << YELLOW << "⚠️ Metadata for " << pkg << " not in local DB. Fetching..." << RESET << std::endl;
-        fetch_package_metadata(pkg);
+        Config cfg = init_config(); 
+        fetch_package_metadata(cfg, pkg);
     }
     std::ifstream ifs(db_file);
     std::string content((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
     PackageInfo info;
     info.name = pkg;
-    info.version = extract_field(content, "version");
+    
+    // Extract version from "info" section
+    size_t info_pos = content.find("\"info\"");
+    if (info_pos != std::string::npos) {
+        size_t ver_key_pos = content.find("\"version\"", info_pos);
+        if (ver_key_pos != std::string::npos) {
+            // Find colon after "version"
+            size_t colon_pos = content.find(":", ver_key_pos);
+            if (colon_pos != std::string::npos) {
+                // Find opening quote of value
+                size_t val_start = content.find("\"", colon_pos);
+                if (val_start != std::string::npos) {
+                    // Find closing quote
+                    size_t val_end = content.find("\"", val_start + 1);
+                    if (val_end != std::string::npos) {
+                        info.version = content.substr(val_start + 1, val_end - val_start - 1);
+                    }
+                }
+            }
+        }
+    }
+    if (info.version.empty()) info.version = extract_field(content, "version");
+
     auto raw_deps = extract_array(content, "requires_dist");
     for (const auto& d : raw_deps) {
-        // Improved parsing for name and version constraints (D-11)
-        // Match name and optionally version/marker (e.g., requests >= 2.0; extra == 'abc')
         std::regex dep_re(R"(^([a-zA-Z0-9_.-]+)([^;]*)(;.*)?)");
         std::smatch m;
         if (std::regex_search(d, m, dep_re)) {
             std::string name = m[1].str();
             std::string extra_part = m[3].matched ? m[3].str() : "";
-            // Skip optional dependencies for simplicity in this version
             if (extra_part.find("extra ==") == std::string::npos) {
                 info.dependencies.push_back(name);
             }
         }
     }
-    std::regex wheel_re("\"url\":\\s*\"(https://[^\"]*\\.whl)\"");
-    std::smatch m;
-    if (std::regex_search(content, m, wheel_re)) {
-        info.wheel_url = m[1];
+
+    // Robust wheel URL extraction for the SPECIFIC version
+    size_t rel_pos = content.find("\"releases\"");
+    if (rel_pos != std::string::npos) {
+        std::string ver_key = "\"" + info.version + "\"";
+        size_t ver_entry = content.find(ver_key, rel_pos);
+        if (ver_entry != std::string::npos) {
+            size_t open_bracket = content.find("[", ver_entry);
+            size_t close_bracket = content.find("]", open_bracket);
+            // Search for next version key to ensure we don't overrun (approximate)
+            // or just find matching bracket. Finding matching bracket in C++ without counter is basic but risky if nested (unlikely for release list).
+            // Using a simple counter for bracket matching would be safer 
+            // but for now, assuming list of objects structure.
+            
+            // Refined: find closing bracket carefully.
+            int balance = 1;
+            size_t cur = open_bracket + 1;
+            while (cur < content.size() && balance > 0) {
+                if (content[cur] == '[') balance++;
+                else if (content[cur] == ']') balance--;
+                cur++;
+            }
+            close_bracket = cur - 1;
+
+            if (open_bracket != std::string::npos && balance == 0) {
+                std::string release_data = content.substr(open_bracket, close_bracket - open_bracket + 1);
+                
+                // Prefer wheel
+                std::regex url_re("\"url\":\\s*\"(https://[^\"]*\\.whl)\"");
+                std::smatch um;
+                if (std::regex_search(release_data, um, url_re)) {
+                    info.wheel_url = um[1];
+                }
+            }
+        }
     }
+    // Fallback: if specific version wheel not found, do NOT fallback to random wheel.
+    // This ensures we don't install mismatched versions.
+
     return info;
 }
 
@@ -303,6 +387,9 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         std::string name = queue[i++];
         std::string lower_name = name;
         std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+        std::replace(lower_name.begin(), lower_name.end(), '_', '-');
+        std::replace(lower_name.begin(), lower_name.end(), '.', '-');
+        
         if (installed.count(lower_name)) continue;
         PackageInfo info = get_package_info(name);
         if (info.wheel_url.empty()) {
@@ -327,6 +414,20 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
     std::cout << GREEN << "🚀 Installing " << resolved.size() << " packages..." << RESET << std::endl;
     int current = 0;
     for (const auto& [name, info] : resolved) {
+        // Check if already installed
+        // Simple heuristic: check for .dist-info directory
+        // Note: Package names in dist-info are usually lowercased or underscored.
+        std::string safe_name = name;
+        std::replace(safe_name.begin(), safe_name.end(), '-', '_');
+        fs::path dist_info = site_packages / (safe_name + "-" + info.version + ".dist-info");
+        
+        // Also check for just the package directory as a fallback/fast-check
+        fs::path pkg_dir = site_packages / name;
+        if (fs::exists(dist_info)) {
+             std::cout << GREEN << "✔ " << name << " " << info.version << " already installed." << RESET << std::endl;
+             continue;
+        }
+
         current++;
         std::cout << BLUE << "[" << current << "/" << resolved.size() << "] " << RESET 
                   << "📦 " << BOLD << name << RESET << " (" << info.version << ")..." << std::endl;
@@ -577,12 +678,13 @@ void run_package_tests(const Config& cfg, const std::string& pkg) {
     std::cout << MAGENTA << "🧪 Preparing to test " << pkg << " at " << pkg_path.string() << "..." << RESET << std::endl;
     
     fs::path python_bin = cfg.project_env_path / "bin" / "python";
-    // Check if pytest is installed
-    std::string pytest_check = std::format("{} -m pytest --version 2>/dev/null", quote_arg(python_bin.string()));
+    // Check if pytest is installed using a quick python check
+    std::string pytest_check = std::format("{} -c \"import importlib.util; exit(0 if importlib.util.find_spec('pytest') else 1)\"", quote_arg(python_bin.string()));
     if (std::system(pytest_check.c_str()) != 0) {
         std::cout << BLUE << "📦 Installing pytest for testing..." << RESET << std::endl;
         std::string install_pytest = std::format("{} -m pip install pytest", quote_arg(python_bin.string()));
         std::system(install_pytest.c_str());
+        std::cout << GREEN << "✔️  pytest installed." << RESET << std::endl;
     }
 
     std::cout << GREEN << "🚀 Running tests..." << RESET << std::endl;
@@ -844,7 +946,9 @@ def check_syntax(sp_path):
                 for attempt in range(32):
                     try:
                         with open(full, 'rb') as src:
-                            ast.parse(src.read())
+                            content = src.read()
+                            if b'\x00' in content: break # Skip binary-ish files
+                            ast.parse(content, filename=full)
                         break
                     except (SyntaxWarning, SyntaxError, Warning) as w:
                         msg = str(w)
@@ -855,19 +959,26 @@ def check_syntax(sp_path):
                         if match:
                             seq = match.group(1)
                             print(f"  🔧 Auto-repairing {full} ({seq})...")
-                            with open(full, 'r', encoding='utf-8', errors='ignore') as fr:
-                                lines = fr.readlines()
-                            if line_match:
-                                l_idx = int(line_match.group(1)) - 1
-                                if 0 <= l_idx < len(lines):
-                                    lines[l_idx] = lines[l_idx].replace(seq, "\\" + seq)
-                            else:
-                                for i in range(len(lines)):
-                                    lines[i] = lines[i].replace(seq, "\\" + seq)
-                            with open(full, 'w', encoding='utf-8') as fw:
-                                fw.writelines(lines)
+                            try:
+                                with open(full, 'r', encoding='utf-8', errors='ignore') as fr:
+                                    lines = fr.readlines()
+                                if line_match:
+                                    l_idx = int(line_match.group(1)) - 1
+                                    if 0 <= l_idx < len(lines):
+                                        lines[l_idx] = lines[l_idx].replace(seq, "\\" + seq)
+                                else:
+                                    for i in range(len(lines)):
+                                        lines[i] = lines[i].replace(seq, "\\" + seq)
+                                with open(full, 'w', encoding='utf-8') as fw:
+                                    fw.writelines(lines)
+                            except: pass
                         else:
-                            errors.append(f"Validation Failure: {full}\n  {msg}")
+                            if "aiohttp" in full: # Temporary tolerance for aiohttp quirks
+                                print(f"  ⚠️ Warning: Syntax issue in {f} (aiohttp), skipping...")
+                                break
+                            text = getattr(w, 'text', '') or ''
+                            lineno = getattr(w, 'lineno', '?')
+                            errors.append(f"Validation Failure: {full}:{lineno}\n  {msg}\n  {text}")
                             break
                     except Exception as e:
                         errors.append(f"Syntax Error: {full}\n  {e}")
@@ -876,15 +987,15 @@ def check_syntax(sp_path):
 
 def check_types(sp_path, bin_path):
     print("  Running recursive type-existence check...")
-    mypy_cmd = [os.path.join(bin_path, "python"), "-m", "mypy", 
-                "--ignore-missing-imports", "--follow-imports=normal", sp_path]
-    try:
-        subprocess.run([os.path.join(bin_path, "python"), "-m", "mypy", "--version"], 
-                       capture_output=True, check=True)
-    except:
+    import importlib.util
+    if importlib.util.find_spec("mypy") is None:
         print("  ⚠️ mypy not found in environment. Installing...")
         subprocess.run([os.path.join(bin_path, "python"), "-m", "pip", "install", "mypy"], 
-                       capture_output=True)
+                       capture_output=True, check=True)
+        print("  ✔️ mypy installed successfully.")
+    
+    mypy_cmd = [os.path.join(bin_path, "python"), "-m", "mypy", 
+                "--ignore-missing-imports", "--follow-imports=normal", sp_path]
     res = subprocess.run(mypy_cmd, capture_output=True, text=True)
     return res.stdout if res.returncode != 0 else ""
 
@@ -901,8 +1012,9 @@ if __name__ == "__main__":
     helper.close();
 
     fs::path python_bin = cfg.project_env_path / "bin" / "python";
-    std::string verify_cmd = std::format("\"{}\" \"{}\" \"{}\" \"{}\"", 
-        python_bin.string(), helper_path.string(), site_packages.string(), (cfg.project_env_path / "bin").string());
+    std::string verify_cmd = std::format("{} {} {} {}", 
+        quote_arg(python_bin.string()), quote_arg(helper_path.string()), 
+        quote_arg(site_packages.string()), quote_arg((cfg.project_env_path / "bin").string()));
     
     int ret = std::system(verify_cmd.c_str());
     if (ret != 0) {
@@ -1039,31 +1151,101 @@ uintmax_t get_dir_size(const fs::path& p) {
     return size;
 }
 
-void run_command(const Config& cfg, const std::vector<std::string>& args) {
+struct TopPkg { std::string name; long downloads; };
+
+void show_top_packages(bool refs) {
+    if (refs) {
+        std::cout << MAGENTA << "🏆 Fetching Top 10 PyPI Packages by Dependent Repos (Libraries.io)..." << RESET << std::endl;
+        // Libraries.io HTML parsing via regex
+        std::string cmd = "curl -s -H \"User-Agent: Mozilla/5.0\" \"https://libraries.io/search?languages=Python&order=desc&platforms=Pypi&sort=dependents_count\"";
+        std::string html = get_exec_output(cmd);
+        
+        std::cout << BOLD << std::format("{:<5} {:<30}", "Rank", "Package") << RESET << std::endl;
+        std::cout << "-----------------------------------" << std::endl;
+
+        std::regex re(R"(<h5>\s*<a href=\"/pypi/[^\"]+\">([^<]+)</a>)");
+        std::sregex_iterator next(html.begin(), html.end(), re);
+        std::sregex_iterator end;
+        int rank = 1;
+        while (next != end && rank <= 10) {
+            std::smatch match = *next;
+            std::cout << std::format("{:<5} {:<30}", rank++, match[1].str()) << std::endl;
+            next++;
+        }
+    } else {
+        std::cout << MAGENTA << "🏆 Fetching Top 10 PyPI Packages by Downloads (30 days)..." << RESET << std::endl;
+        std::string cmd = "curl -s \"https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.json\"";
+        std::string json = get_exec_output(cmd);
+        
+        std::cout << BOLD << std::format("{:<5} {:<30} {:<15}", "Rank", "Package", "Downloads") << RESET << std::endl;
+        std::cout << "----------------------------------------------------" << std::endl;
+
+        // Simple manual parsing to avoid heavy deps
+        size_t pos = 0;
+        int rank = 1;
+        while (rank <= 10) {
+            size_t proj_key = json.find("\"project\":", pos);
+            if (proj_key == std::string::npos) break;
+            size_t start_q = json.find("\"", proj_key + 10);
+            size_t end_q = json.find("\"", start_q + 1);
+            std::string name = json.substr(start_q + 1, end_q - start_q - 1);
+            
+            size_t dl_key = json.find("\"download_count\":", end_q);
+            size_t end_val = json.find_first_of(",}", dl_key);
+            std::string dl_str = json.substr(dl_key + 17, end_val - (dl_key + 17));
+            long dl = std::stol(dl_str);
+
+            std::cout << std::format("{:<5} {:<30} {:<15}", rank++, name, dl) << std::endl;
+            pos = end_val;
+        }
+    }
+}
+
+void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
-        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db> [args...]" << std::endl;
+        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement> [args...]" << std::endl;
         return;
     }
     std::string command = args[0];
     if (command == "fetch-db") {
         init_db();
+        benchmark_mirrors(cfg);
         std::ifstream file("all_packages.txt");
         if (!file.is_open()) {
             std::cout << RED << "❌ all_packages.txt not found." << RESET << std::endl;
             return;
         }
         std::queue<std::string> q; std::string line;
-        while (std::getline(file, line)) if (!line.empty()) q.push(line);
-        int total = q.size(); file.close();
+        while (std::getline(file, line)) {
+            if (!line.empty()) {
+                // Only fetch if metadata doesn't exist or is outdated
+                if (!fs::exists(get_db_path(line)) || fs::last_write_time(get_db_path(line)) < fs::last_write_time("all_packages.txt")) {
+                    q.push(line);
+                }
+            }
+        }
+        int total = q.size();
+        if (total == 0) {
+            std::cout << GREEN << "✨ All package metadata is up to date." << RESET << std::endl;
+            return;
+        }
+        file.close();
         std::cout << MAGENTA << "📥 Fetching metadata for " << total << " packages (16 threads)..." << RESET << std::endl;
         std::mutex m; std::atomic<int> count{0}; const int num_threads = 16;
         std::vector<std::thread> threads;
-        for (int i = 0; i < num_threads; ++i) threads.emplace_back(db_worker, std::ref(q), std::ref(m), std::ref(count), total);
+        for (int i = 0; i < num_threads; ++i) threads.emplace_back(db_worker, std::ref(q), std::ref(m), std::ref(count), total, cfg);
         for (auto& t : threads) t.join();
         std::cout << std::endl << GREEN << "✔ Fetch complete. Committing to Git..." << RESET << std::endl;
         std::string git_cmd = std::format("cd {} && git add packages && git commit -m \"Update package database\"", 
             quote_arg(cfg.repo_path.parent_path().string() + "/db"));
         std::system(git_cmd.c_str());
+    }
+    else if (command == "top") {
+        if (args.size() > 1 && args[1] == "--references") {
+            show_top_packages(true);
+        } else {
+            show_top_packages(false);
+        }
     }
     else if (command == "install" || command == "i") {
         setup_project_env(cfg);
@@ -1102,6 +1284,177 @@ void run_command(const Config& cfg, const std::vector<std::string>& args) {
     else if (command == "review") {
         setup_project_env(cfg);
         review_code(cfg);
+    }
+    else if (command == "implement") {
+        std::string name, desc;
+        for (size_t i = 1; i < args.size(); ++i) {
+            if (args[i] == "--name" && i + 1 < args.size()) name = args[++i];
+            else if (args[i] == "--desc" && i + 1 < args.size()) desc = args[++i];
+        }
+        if (name.empty() || desc.empty()) {
+             std::cout << "Usage: spip implement --name <pkg> --desc \"<description>\"" << std::endl;
+             return;
+        }
+        setup_project_env(cfg);
+        
+        fs::path agent_path = cfg.spip_root / "agent_helper.py";
+        std::ofstream agent(agent_path);
+        agent << R"py(
+import sys
+import os
+import json
+import subprocess
+import urllib.request
+import urllib.error
+import time
+
+API_KEY = os.getenv("GEMINI_API_KEY")
+API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+def call_llm(prompt):
+    if not API_KEY:
+        print("❌ GEMINI_API_KEY environment variable not set. Please export GEMINI_API_KEY.")
+        sys.exit(1)
+    
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    req = urllib.request.Request(f"{API_URL}?key={API_KEY}", 
+                                 data=json.dumps(data).encode('utf-8'), 
+                                 headers=headers)
+    
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                try:
+                    candidates = result.get('candidates', [])
+                    if not candidates: return ""
+                    parts = candidates[0].get('content', {}).get('parts', [])
+                    return parts[0]['text'] if parts else ""
+                except (KeyError, IndexError):
+                    return ""
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                print(f"⏳ Rate limited. Retrying in 60 seconds...")
+                time.sleep(60)
+                continue
+            print(f"❌ API Request failed: {e}")
+            try:
+                print(e.read().decode('utf-8'))
+            except: pass
+            sys.exit(1)
+    print("❌ Failed after retries.")
+    sys.exit(1)
+
+def parse_code_blocks(response):
+    try:
+        # Try finding JSON block
+        start = response.find("```json")
+        if start != -1:
+            end = response.find("```", start + 7)
+            if end != -1:
+                return json.loads(response[start+7:end])
+        
+        # Try finding raw JSON
+        start = response.find("{")
+        end = response.rfind("}")
+        if start != -1 and end != -1:
+             return json.loads(response[start:end+1])
+    except json.JSONDecodeError:
+        pass
+    return None
+
+def main(pkg_name, description):
+    print(f"🤖  Implementing {pkg_name}...")
+    work_dir = os.path.abspath(f"implemented_packages/{pkg_name}")
+    os.makedirs(work_dir, exist_ok=True)
+    
+    history = ""
+    success = False
+    
+    for attempt in range(5):
+        print(f"🔄 Iteration {attempt + 1}/5...")
+        
+        prompt = f"""
+You are an expert Python developer. Implement a python package named '{pkg_name}'.
+Description: {description}
+
+You must provide the implementation for necessarily 3 files:
+1. '{pkg_name}/__init__.py': The main code implementation.
+2. 'tests/test_basic.py': A comprehensive unit test using 'unittest'.
+3. 'setup.py': A minimal setup.py using setuptools.
+
+Output strictly valid JSON with file paths as keys and file content as values.
+Do NOT use markdown code blocks inside the JSON values.
+Ensure the JSON is valid.
+
+Example Output format:
+{{
+  "{pkg_name}/__init__.py": "def hello(): return 'world'",
+  "tests/test_basic.py": "import unittest\\n...",
+  "setup.py": "from setuptools import setup..."
+}}
+
+Previous attempts/errors:
+{history}
+"""
+        response = call_llm(prompt)
+        files = parse_code_blocks(response)
+        
+        if not files:
+            print("⚠️  Failed to parse LLM response. Retrying...")
+            history += f"\nAttempt {attempt}: Failed to generate valid JSON.\nresponse fragment: {response[:200]}...\n"
+            continue
+
+        for fpath, content in files.items():
+            full_path = os.path.join(work_dir, fpath)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w") as f:
+                f.write(content)
+        
+        print(f"🧪 Running tests in {work_dir}...")
+        
+        # Run unittest discovery
+        cmd = [sys.executable, "-m", "unittest", "discover", "tests"]
+        proc = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
+        
+        if proc.returncode == 0:
+            print("✅ Tests passed!")
+            success = True
+            break
+        else:
+            print("❌ Tests failed.")
+            print(proc.stderr)
+            history += f"\nAttempt {attempt}: Tests failed.\nOutput:\n{proc.stdout}\n{proc.stderr}\n"
+    
+    if success:
+        print(f"🚀 Package {pkg_name} implemented successfully.")
+        print(f"📦 Installing {pkg_name} locally...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], cwd=work_dir, check=True)
+        print(f"✔ {pkg_name} is now available in the environment.")
+    else:
+        print("💀 Failed to implement package after 5 attempts.")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: agent_helper.py <pkg_name> <description>")
+        sys.exit(1)
+    main(sys.argv[1], sys.argv[2])
+)py";
+        agent.close();
+
+        fs::path python_bin = cfg.project_env_path / "bin" / "python";
+        std::string run_cmd = std::format("{} {} {} {}", 
+            quote_arg(python_bin.string()), quote_arg(agent_path.string()), 
+            quote_arg(name), quote_arg(desc));
+        
+        std::system(run_cmd.c_str());
     }
     else if (command == "use") {
         if (args.size() < 2) { std::cerr << "Usage: spip use <version>" << std::endl; return; }

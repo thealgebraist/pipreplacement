@@ -1,2 +1,6 @@
 spip
 summary.log
+*.tgz
+summary.aux
+summary.out
+summary.pdf
