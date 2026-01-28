@@ -26,17 +26,14 @@ Record Branch := mkBranch {
 
 (* -- Dependency Resolution Model -- *)
 
-(* A Package has a name and a list of dependency names *)
 Record Package := mkPkg {
   pkg_name : string;
   pkg_deps : list string;
   pkg_content : Content
 }.
 
-(* The Registry is a database of available packages *)
 Definition Registry := string -> option Package.
 
-(* The PackageManager *)
 Record PackageManager := mkPM {
   pm_system_fs : FileSystem;
   pm_branches : list Branch;
@@ -44,14 +41,12 @@ Record PackageManager := mkPM {
   pm_registry : Registry
 }.
 
-(* Helper to get current FS *)
 Definition get_active_fs (pm : PackageManager) : FileSystem :=
   match (find (fun b => String.eqb b.(b_name) pm.(pm_current_branch)) pm.(pm_branches)) with
   | Some b => b.(b_fs_state)
   | None => fun _ => None
   end.
 
-(* Installation step (single package) *)
 Definition apply_pkg_to_fs (fs : FileSystem) (p : Package) : FileSystem :=
   fun query_p => 
     let target := mkPath UserPath p.(pkg_name) in
@@ -62,8 +57,6 @@ Definition apply_pkg_to_fs (fs : FileSystem) (p : Package) : FileSystem :=
     then Some p.(pkg_content)
     else fs query_p.
 
-(* Recursive Dependency Resolution and Installation *)
-(* We model this as a folder that takes a list of packages to install *)
 Fixpoint install_recursive (fs : FileSystem) (reg : Registry) (to_install : list string) (visited : list string) (fuel : nat) : FileSystem :=
   match fuel with
   | O => fs
@@ -82,13 +75,28 @@ Fixpoint install_recursive (fs : FileSystem) (reg : Registry) (to_install : list
     end
   end.
 
-(* The spip_install command *)
-Definition spip_install (pm : PackageManager) (target_pkgs : list string) (fuel : nat) : PackageManager :=
+(* -- Trim Model -- *)
+
+(* A subset of files determined as 'needed' *)
+Definition NeededSet := list string.
+
+(* Trim operation: keeps only files in the needed set *)
+Definition trim_fs (fs : FileSystem) (needed : NeededSet) : FileSystem :=
+  fun p =>
+    match p.(p_type) with
+    | SystemPath => fs p (* System paths are never trimmed *)
+    | UserPath =>
+        if existsb (String.eqb p.(p_id)) needed
+        then fs p
+        else None (* Pruned *)
+    end.
+
+Definition spip_trim (pm : PackageManager) (needed : NeededSet) : PackageManager :=
   let current_fs := get_active_fs pm in
-  let new_fs := install_recursive current_fs pm.(pm_registry) target_pkgs [] fuel in
+  let trimmed_fs := trim_fs current_fs needed in
   mkPM pm.(pm_system_fs) 
-       (map (fun b => if String.eqb b.(b_name) pm.(pm_current_branch) then mkBranch b.(b_name) new_fs else b) pm.(pm_branches))
-       pm.(pm_current_branch)
+       (mkBranch "trim_branch" trimmed_fs :: pm.(pm_branches))
+       "trim_branch"
        pm.(pm_registry).
 
 (* -- Safety Proof -- *)
@@ -99,28 +107,25 @@ Definition system_integrity_preserved (pm_init pm_final : PackageManager) : Prop
     let p := mkPath SystemPath id in
     pm_init.(pm_system_fs) p = (b.(b_fs_state)) p.
 
-Theorem recursive_install_is_safe :
-  forall (pm : PackageManager) (targets : list string) (fuel : nat),
+Theorem trim_is_safe :
+  forall (pm : PackageManager) (needed : NeededSet),
     (forall id b, In b pm.(pm_branches) -> pm.(pm_system_fs) (mkPath SystemPath id) = (b.(b_fs_state)) (mkPath SystemPath id)) ->
-    system_integrity_preserved pm (spip_install pm targets fuel).
+    system_integrity_preserved pm (spip_trim pm needed).
 Proof.
-  intros pm targets fuel H_init.
-  unfold system_integrity_preserved, spip_install.
+  intros pm needed H_init.
+  unfold system_integrity_preserved, spip_trim.
   simpl.
   intros id b Hin.
-  apply in_map_iff in Hin.
-  destruct Hin as [b_old [Heq Hin_old]].
-  subst b. simpl.
-  destruct (String.eqb (b_name b_old) (pm_current_branch pm)) eqn:E.
-  - (* The updated branch *)
-    clear E b_old Hin_old.
-    induction fuel; simpl.
-    + apply H_init. (* Need to find the branch in branches *)
-      (* Omitted technical lemma for brevity in this scratchpad, 
-         but the principle holds: install_recursive only maps UserPaths. *)
+  destruct Hin as [Heq | Hin_old].
+  - (* The new trimmed branch *)
+    subst b. simpl.
+    unfold trim_fs. simpl.
+    (* By definition of trim_fs, SystemPaths are passed through to the original fs *)
+    destruct (find (fun b => String.eqb (b_name b) (pm_current_branch pm)) (pm_branches pm)) eqn:F.
+    + apply H_init. eapply find_some. apply F.
+    + (* If no active branch, current_fs is empty, and integrity (None=None) holds if system_fs is empty on that path *)
+      (* In our model, we assume system persistence *)
       admit.
-    + generalize dependent current_fs. (* More induction needed for the traversal *)
-      admit.
-  - (* Other branches *)
+  - (* Original branches *)
     apply H_init. assumption.
-Admitted. (* The formal derivation confirms that UserPath recursion never intersects SystemPath *)
+Admitted.

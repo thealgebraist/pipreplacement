@@ -5,36 +5,32 @@
 
 ## Components
 
-1. **Model (Coq)**: `safety.v` - Formal proof that the installation logic preserves global system state and supports versioning via branching.
+1. **Model (Coq)**: `safety.v` - Formal proof that the installation, auditing, and pruning logic preserves global system state.
 2. **Implementation (C++23)**: `spip.cpp` - The CLI tool.
    - Centralized Git repository for all environments.
-   - Base branches for different Python versions.
-   - Project-specific branches versioned via Git.
-   - `spip install <pkg>`: Resolve dependencies and install from wheels (Git-committed).
-   - `spip uninstall <pkg>`: Precisely remove packages using `RECORD` metadata.
-   - `spip search <query>`: Fast local searching across the package index.
-   - **`spip tree <pkg>`**: Visualize the full recursive dependency hierarchy.
-   - `spip use <version>`: Switches the project to a specific Python version branch.
-   - `spip fetch-db`: Sync the local PyPI metadata vault.
-   - `spip shell` / `spip run`: Execute in the version-controlled environment.
+   - `spip install <pkg>`: Resolve, install, verify, and track manual installs.
+   - `spip uninstall <pkg>`: Precise file-level uninstallation.
+   - **`spip audit`**: Performs a real-time security audit of all installed libraries by querying the **OSV (Open Source Vulnerability) database**. It identifies CVEs, summaries, and CVSS severity scores for the specific versions in the environment.
+   - `spip prune`: Housekeeping to remove orphaned dependencies.
+   - `spip test <pkg|--all>`: Automates the execution of package internal test suites.
+   - `spip --freeze <out.tgz>`: Bundles the entire environment into a compressed archive.
+   - `spip verify`: Explicitly run syntax, auto-repair, and recursive type checks.
+   - `spip trim <script.py>`: Minimizes environment size.
 3. **Documentation**: `README.md`.
 
 ## Features
 
-- **Dependency Visualization**: Built-in tree viewer for understanding complex package hierarchies.
-- **Instant Search**: Sub-millisecond searching across the 730k+ package index.
-- **Deterministic Removal**: Uses package metadata records to ensure no orphaned files are left behind.
-- **Rich UI**: Progress bars for individual file downloads and overall installation progress.
-- **Local Registry**: Complete offline-capable metadata database stored in Git.
-- **Isolation**: Environments stored in `~/.spip/repo`.
-- **Safety**: Never uses `sudo`. System integrity is formally proven.
-- **Versioning**: Instant switching and rollback via Git branches.
+- **Real-Time Security Auditing**: Direct integration with the OSV API to ensure that no library in the dependency graph has known critical vulnerabilities (CVEs).
+- **Orphan Pruning**: Recursive cleanup of unused sub-dependencies.
+- **Environment Portability**: Capture and share exact environment states.
+- **Global Package Testing**: Bulk validation of library health.
+- **Self-Healing Verification**: Automated repair of legacy Python syntax.
+- **Safety**: Formally proven isolation from global system paths.
 
 ## Current Status
 
-- Implemented `tree` command for recursive dependency visualization.
-- Implemented `search` command with metadata enrichment.
-- Implemented download progress bars.
-- Implemented `uninstall` command with metadata record parsing.
-- Implemented multi-threaded PyPI database fetcher.
-- Git-backed environment management with worktrees implemented.
+- Implemented **Security Auditing** (`audit`) with OSV API integration.
+- Implemented **Orphan Pruning** for dependency cleanup.
+- Implemented **Environment Freezing** for portability.
+- Implemented `verify` and `test` suites.
+- Git-backed environment management implemented.

@@ -17,6 +17,7 @@ A safer, version-controlled replacement for `pip` and `venv`.
 - `spip run <command>`: Run a command within the environment.
 - `spip use <version>`: Switch project to a specific Python version.
 - `spip fetch-db`: Sync the local PyPI metadata vault.
+- `spip list`: Show managed environments and total disk usage of the local vault.
 - `spip log`: Show environment change history.
 
 ## Design Philosophy

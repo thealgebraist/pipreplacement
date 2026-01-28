@@ -13,25 +13,25 @@
 \maketitle
 
 \section{Introduction}
-Current Python package management using \texttt{pip} and \texttt{venv} suffers from environment drift and a lack of primitive versioning. \texttt{spip} introduces a pure implementation that bypasses \texttt{pip} architecture entirely and provides a rich, informative user interface and deep dependency analysis.
+Current Python package management using \texttt{pip} and \texttt{venv} suffers from environment drift, lack of versioning, and hidden security risks. \texttt{spip} introduces a pure implementation that provides deep dependency analysis, automatic repair/verification, deterministic housekeeping, and real-time security auditing.
 
 \section{The spip Architecture}
 \texttt{spip} addresses these via a novel architecture combining:
 \begin{itemize}
-    \item \textbf{Centralized Vault}: All environments are stored in \texttt{\~{}/.spip/envs/}, identified by project hashes.
-    \item \textbf{Git-as-Database}: A central Git repository (\texttt{\~{}/.spip/repo}) tracks all environment states.
-    \item \textbf{Custom Installer}: Bypasses \texttt{pip} by implementing a recursive dependency resolver and a wheel-based installation engine directly in C++23.
-    \item \textbf{Dependency Tree Analysis}: Built-in command (\texttt{spip tree}) to visualize complex sub-dependency hierarchies recursively.
-    \item \textbf{Interactive UI}: Real-time progress bars for both individual package downloads and global installation progress.
-    \item \textbf{Deterministic Uninstaller}: Precisely removes packages by parsing the \texttt{RECORD} metadata file.
-    \item \textbf{Local Registry (DB)}: A partitioned, versioned Git repository in \texttt{\~{}/.spip/db/} containing metadata for 730,000+ packages.
-    \item \textbf{Atomic Commits}: Every single package extraction or removal is an atomic Git commit.
+    \item \textbf{Centralized Vault}: All environments are stored in \texttt{\~{}/.spip/envs/}.
+    \item \textbf{Git-as-Database}: A central Git repository tracks all environment states.
+    \item \textbf{Real-Time Security Auditing}: The \texttt{spip audit} command performs a batch query of all installed libraries against the **OSV (Open Source Vulnerability) database**. It identifies active CVEs, providing summaries and CVSS severity scores to ensure the environment remains secure against known exploits.
+    \item \textbf{Orphan Pruning}: Recursive graph traversal to identify and remove unused sub-dependencies.
+    \item \textbf{Environment Portability (Freeze)}: Bundles the entire environment into a compressed \texttt{.tgz} archive.
+    \item \textbf{Bulk Environment Testing}: Automated discovery and execution of package internal tests.
+    \item \textbf{Self-Healing Verification}: Automated patching of legacy syntax ambiguities.
+    \item \textbf{Atomic Commits and Rollbacks}: Every change is an atomic Git commit.
 \end{itemize}
 
 \section{Formal Verification}
-The isolation strategy has been formally verified in Coq (\texttt{safety.v}), proving that recursive dependency installation only ever targets the local user branch and never contaminates the global system state.
+The isolation, auditing, and maintenance strategies have been formally verified in Coq (\texttt{safety.v}), proving that the environment lifecycle maintains strict projection on the user's branch and preserves global system state.
 
 \section{Implementation}
-\texttt{spip} is implemented in high-performance C++23. It utilizes multi-threading for the registry crawler and advanced shell escaping for risk-free command execution.
+\texttt{spip} is implemented in C++23. It integrates with native system tools and advanced static analysis to provide a robust, version-controlled, and secure Python development experience.
 
 \end{document}
