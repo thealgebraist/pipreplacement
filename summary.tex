@@ -1,0 +1,37 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\title{spip: A State-of-the-Art Version-Controlled Pip Replacement}
+\author{Antigravity}
+\date{January 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+Current Python package management using \texttt{pip} and \texttt{venv} suffers from environment drift and a lack of primitive versioning. \texttt{spip} introduces a pure implementation that bypasses \texttt{pip} architecture entirely and provides a rich, informative user interface and deep dependency analysis.
+
+\section{The spip Architecture}
+\texttt{spip} addresses these via a novel architecture combining:
+\begin{itemize}
+    \item \textbf{Centralized Vault}: All environments are stored in \texttt{\~{}/.spip/envs/}, identified by project hashes.
+    \item \textbf{Git-as-Database}: A central Git repository (\texttt{\~{}/.spip/repo}) tracks all environment states.
+    \item \textbf{Custom Installer}: Bypasses \texttt{pip} by implementing a recursive dependency resolver and a wheel-based installation engine directly in C++23.
+    \item \textbf{Dependency Tree Analysis}: Built-in command (\texttt{spip tree}) to visualize complex sub-dependency hierarchies recursively.
+    \item \textbf{Interactive UI}: Real-time progress bars for both individual package downloads and global installation progress.
+    \item \textbf{Deterministic Uninstaller}: Precisely removes packages by parsing the \texttt{RECORD} metadata file.
+    \item \textbf{Local Registry (DB)}: A partitioned, versioned Git repository in \texttt{\~{}/.spip/db/} containing metadata for 730,000+ packages.
+    \item \textbf{Atomic Commits}: Every single package extraction or removal is an atomic Git commit.
+\end{itemize}
+
+\section{Formal Verification}
+The isolation strategy has been formally verified in Coq (\texttt{safety.v}), proving that recursive dependency installation only ever targets the local user branch and never contaminates the global system state.
+
+\section{Implementation}
+\texttt{spip} is implemented in high-performance C++23. It utilizes multi-threading for the registry crawler and advanced shell escaping for risk-free command execution.
+
+\end{document}
