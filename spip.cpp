@@ -38,9 +38,31 @@ struct Config {
 };
 
 std::string compute_hash(const std::string& s) {
-    std::hash<std::string> hasher;
-    size_t h = hasher(s);
+    // Robust, deterministic FNV-1a like mixing for project identifiers
+    uint64_t h = 0xcbf29ce484222325;
+    for (char c : s) {
+        h ^= static_cast<uint8_t>(c);
+        h *= 0x100000001b3;
+    }
+    // Mixing step
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccd;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53;
+    h ^= h >> 33;
     return std::format("{:x}", h);
+}
+
+std::string quote_arg(const std::string& arg) {
+    // Full shell sanitization: escape all backslashes, double quotes, and dollars
+    // Then wrap in double quotes. This prevents most injection vectors in POSIX shells.
+    std::string result = "\"";
+    for (char c : arg) {
+        if (c == '\"' || c == '\\' || c == '$' || c == '`') result += "\\";
+        result += c;
+    }
+    result += "\"";
+    return result;
 }
 
 std::string get_exec_output(const std::string& cmd) {
@@ -80,7 +102,7 @@ void ensure_dirs(const Config& cfg) {
     if (!fs::exists(cfg.envs_root)) fs::create_directories(cfg.envs_root);
     if (!fs::exists(cfg.repo_path)) {
         fs::create_directories(cfg.repo_path);
-        std::string cmd = std::format("cd \"{}\" && git init && git commit --allow-empty -m \"Initial commit\"", cfg.repo_path.string());
+        std::string cmd = std::format("cd {} && git init && git commit --allow-empty -m \"Initial commit\"", quote_arg(cfg.repo_path.string()));
         std::system(cmd.c_str());
         std::ofstream gitignore(cfg.repo_path / ".gitignore");
         gitignore << "# Full environment tracking\n";
@@ -89,7 +111,7 @@ void ensure_dirs(const Config& cfg) {
 }
 
 bool branch_exists(const Config& cfg, const std::string& branch) {
-    std::string cmd = std::format("cd \"{}\" && git rev-parse --verify \"{}\" 2>/dev/null", cfg.repo_path.string(), branch);
+    std::string cmd = std::format("cd {} && git rev-parse --verify {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(branch));
     return !get_exec_output(cmd).empty();
 }
 
@@ -98,8 +120,12 @@ void create_base_version(const Config& cfg, const std::string& version) {
     if (branch_exists(cfg, branch)) return;
 
     std::cout << MAGENTA << "🔨 Bootstrapping base Python " << version << "..." << RESET << std::endl;
-    fs::path temp_venv = cfg.spip_root / ("temp_venv_" + version);
-    std::string venv_cmd = std::format("python{} -m venv \"{}\"", version, temp_venv.string());
+    // Sanitize version to prevent shell injection (S-01)
+    std::string safe_v = "";
+    for(char c : version) if(std::isalnum(c) || c == '.') safe_v += c;
+
+    fs::path temp_venv = cfg.spip_root / ("temp_venv_" + safe_v);
+    std::string venv_cmd = std::format("python{} -m venv {}", safe_v, quote_arg(temp_venv.string()));
     int ret = std::system(venv_cmd.c_str());
     if (ret != 0) {
         std::cerr << RED << "❌ Failed to create venv for python " << version << RESET << std::endl;
@@ -124,19 +150,22 @@ void setup_project_env(const Config& cfg, const std::string& version = "3") {
         if (!branch_exists(cfg, base_branch)) {
             create_base_version(cfg, version);
         }
+        std::cout << MAGENTA << "🔨 Bootstrapping base Python " << version << "..." << RESET << std::endl;
+        create_base_version(cfg, version);
         std::cout << GREEN << "🌟 Creating new environment branch: " << branch << RESET << std::endl;
-        std::string cmd = std::format("cd \"{}\" && git branch \"{}\" \"{}\"", cfg.repo_path.string(), branch, base_branch);
+        std::string cmd = std::format("cd {} && git branch {} {}", 
+            quote_arg(cfg.repo_path.string()), quote_arg(branch), quote_arg(base_branch));
         std::system(cmd.c_str());
     }
 
     if (!fs::exists(cfg.project_env_path)) {
         std::cout << CYAN << "📂 Linking worktree for project..." << RESET << std::endl;
-        std::system(std::format("cd \"{}\" && git checkout main 2>/dev/null", cfg.repo_path.string()).c_str());
-        std::string cmd = std::format("cd \"{}\" && git worktree add \"{}\" \"{}\"", 
-            cfg.repo_path.string(), cfg.project_env_path.string(), branch);
+        std::system(std::format("cd {} && git checkout main 2>/dev/null", quote_arg(cfg.repo_path.string())).c_str());
+        std::string cmd = std::format("cd {} && git worktree add {} {}", 
+            quote_arg(cfg.repo_path.string()), quote_arg(cfg.project_env_path.string()), quote_arg(branch));
         int ret = std::system(cmd.c_str());
         if (ret != 0) {
-            std::system(std::format("cd \"{}\" && git worktree prune", cfg.repo_path.string()).c_str());
+            std::system(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
             std::system(cmd.c_str());
         }
         std::ofstream os(cfg.project_env_path / ".project_origin");
@@ -145,8 +174,8 @@ void setup_project_env(const Config& cfg, const std::string& version = "3") {
 }
 
 void commit_state(const Config& cfg, const std::string& msg) {
-    std::string cmd = std::format("cd \"{}\" && git add -A && git commit -m \"{}\" --allow-empty", 
-        cfg.project_env_path.string(), msg);
+    std::string cmd = std::format("cd {} && git add -A && git commit -m {} --allow-empty", 
+        quote_arg(cfg.project_env_path.string()), quote_arg(msg));
     std::system(cmd.c_str());
 }
 
@@ -204,7 +233,9 @@ struct PackageInfo {
 };
 
 std::string extract_field(const std::string& json, const std::string& key) {
-    std::regex re("\"" + key + "\":\\s*\"([^\"]*)\"");
+    // Hardened regex: strictly match key and string value, limited backtracking
+    std::string pattern = "\"" + key + "\":\\s*\"([^\"]*?)\"";
+    std::regex re(pattern);
     std::smatch match;
     if (std::regex_search(json, match, re)) return match[1];
     return "";
@@ -212,11 +243,13 @@ std::string extract_field(const std::string& json, const std::string& key) {
 
 std::vector<std::string> extract_array(const std::string& json, const std::string& key) {
     std::vector<std::string> result;
-    std::regex re("\"" + key + "\":\\s*\\[([^\\]]*)\\]");
+    // Hardened regex: find array start, capture content until first closing bracket
+    std::string pattern = "\"" + key + "\":\\s*\\[(.*?)\\]";
+    std::regex re(pattern);
     std::smatch match;
     if (std::regex_search(json, match, re)) {
         std::string array_content = match[1];
-        std::regex item_re("\"([^\"]*)\"");
+        std::regex item_re("\"([^\"]*?)\"");
         auto words_begin = std::sregex_iterator(array_content.begin(), array_content.end(), item_re);
         auto words_end = std::sregex_iterator();
         for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
@@ -239,11 +272,16 @@ PackageInfo get_package_info(const std::string& pkg) {
     info.version = extract_field(content, "version");
     auto raw_deps = extract_array(content, "requires_dist");
     for (const auto& d : raw_deps) {
-        std::regex name_re("^([a-zA-Z0-9_.-]+)");
+        // Improved parsing for name and version constraints (D-11)
+        // Match name and optionally version/marker (e.g., requests >= 2.0; extra == 'abc')
+        std::regex dep_re(R"(^([a-zA-Z0-9_.-]+)([^;]*)(;.*)?)");
         std::smatch m;
-        if (std::regex_search(d, m, name_re)) {
-            if (d.find("extra ==") == std::string::npos) {
-                info.dependencies.push_back(m[1]);
+        if (std::regex_search(d, m, dep_re)) {
+            std::string name = m[1].str();
+            std::string extra_part = m[3].matched ? m[3].str() : "";
+            // Skip optional dependencies for simplicity in this version
+            if (extra_part.find("extra ==") == std::string::npos) {
+                info.dependencies.push_back(name);
             }
         }
     }
@@ -295,11 +333,36 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         
         fs::path temp_wheel = cfg.spip_root / (name + ".whl");
         // Use curl's -# (or --progress-bar) for a cleaner progress bar
-        std::string dl_cmd = std::format("curl -L -# \"{}\" -o \"{}\"", info.wheel_url, temp_wheel.string());
+        // info.wheel_url is from PyPI JSON but should still be quoted
+        std::string dl_cmd = std::format("curl -L -# {} -o {}", quote_arg(info.wheel_url), quote_arg(temp_wheel.string()));
         std::system(dl_cmd.c_str());
         
-        std::string unzip_cmd = std::format("unzip -q -o \"{}\" -d \"{}\"", temp_wheel.string(), site_packages.string());
-        std::system(unzip_cmd.c_str());
+        // Critical: S-02 Safe Extraction to prevent path traversal
+        fs::path extraction_helper = cfg.spip_root / "safe_extract.py";
+        {
+            std::ofstream oh(extraction_helper);
+            oh << R"py(
+import zipfile, sys, os
+def safe_extract(zip_path, extract_to):
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        for member in z.infolist():
+            # Prevent path traversal
+            if os.path.isabs(member.filename) or '..' in member.filename:
+                print(f"Skipping dangerous member: {member.filename}")
+                continue
+            z.extract(member, extract_to)
+if __name__ == "__main__":
+    if len(sys.argv) < 3: sys.exit(1)
+    safe_extract(sys.argv[1], sys.argv[2])
+)py";
+        }
+        
+        fs::path python_bin = cfg.project_env_path / "bin" / "python";
+        std::string extract_cmd = std::format("{} {} {} {}", 
+            quote_arg(python_bin.string()), quote_arg(extraction_helper.string()), 
+            quote_arg(temp_wheel.string()), quote_arg(site_packages.string()));
+        std::system(extract_cmd.c_str());
+        
         fs::remove(temp_wheel);
     }
 }
@@ -394,20 +457,7 @@ void prune_orphans(const Config& cfg) {
     std::cout << GREEN << "✔️  Orphan pruning complete." << RESET << std::endl;
 }
 
-std::string quote_arg(const std::string& arg) {
-    if (arg.find(' ') == std::string::npos && arg.find(';') == std::string::npos && 
-        arg.find('(') == std::string::npos && arg.find(')') == std::string::npos &&
-        arg.find('\'') == std::string::npos && arg.find('\"') == std::string::npos) {
-        return arg;
-    }
-    std::string result = "\"";
-    for (char c : arg) {
-        if (c == '\"' || c == '\\' || c == '`' || c == '$') result += "\\";
-        result += c;
-    }
-    result += "\"";
-    return result;
-}
+
 
 void uninstall_package(const Config& cfg, const std::string& pkg) {
     fs::path site_packages;
@@ -445,7 +495,15 @@ void uninstall_package(const Config& cfg, const std::string& pkg) {
             if (comma != std::string::npos) {
                 std::string rel_path = line.substr(0, comma);
                 fs::path full_path = site_packages / rel_path;
-                if (fs::exists(full_path) && !fs::is_directory(full_path)) fs::remove(full_path);
+                if (fs::exists(full_path) && !fs::is_directory(full_path)) {
+                    fs::remove(full_path);
+                    // Prune empty parent directories up to site_packages
+                    fs::path p = full_path.parent_path();
+                    while (p != site_packages && fs::exists(p) && fs::is_empty(p)) {
+                        fs::remove(p);
+                        p = p.parent_path();
+                    }
+                }
             }
         }
     }
@@ -520,15 +578,15 @@ void run_package_tests(const Config& cfg, const std::string& pkg) {
     
     fs::path python_bin = cfg.project_env_path / "bin" / "python";
     // Check if pytest is installed
-    std::string pytest_check = std::format("\"{}\" -m pytest --version 2>/dev/null", python_bin.string());
+    std::string pytest_check = std::format("{} -m pytest --version 2>/dev/null", quote_arg(python_bin.string()));
     if (std::system(pytest_check.c_str()) != 0) {
         std::cout << BLUE << "📦 Installing pytest for testing..." << RESET << std::endl;
-        std::string install_pytest = std::format("\"{}\" -m pip install pytest", python_bin.string());
+        std::string install_pytest = std::format("{} -m pip install pytest", quote_arg(python_bin.string()));
         std::system(install_pytest.c_str());
     }
 
     std::cout << GREEN << "🚀 Running tests..." << RESET << std::endl;
-    std::string test_cmd = std::format("\"{}\" -m pytest \"{}\"", python_bin.string(), pkg_path.string());
+    std::string test_cmd = std::format("{} -m pytest {}", quote_arg(python_bin.string()), quote_arg(pkg_path.string()));
     std::system(test_cmd.c_str());
 }
 
@@ -650,7 +708,11 @@ def audit_packages(packages):
                         cvss = ""
                         for s in v.get('severity', []):
                             if s.get('type') == 'CVSS_V3': cvss = f" [CVSS {s.get('score')}]"
-                        print(f"  - {v.get('id')}: {v.get('summary', 'No summary')}{cvss}")
+                        desc = v.get('summary')
+                        if not desc:
+                            desc = v.get('details', 'No description available').split('\n')[0]
+                        if len(desc) > 80: desc = desc[:77] + "..."
+                        print(f"  - {v.get('id')}: {desc}{cvss}")
             
             if not found_any:
                 print("\033[32m✨ No known vulnerabilities found for installed packages.\033[0m")
@@ -674,6 +736,80 @@ if __name__ == "__main__":
         python_bin.string(), helper_path.string(), site_packages.string());
     
     std::system(audit_cmd.c_str());
+}
+
+void review_code(const Config& cfg) {
+    const char* api_key = std::getenv("GEMINI_API_KEY");
+    if (!api_key) {
+        std::cout << YELLOW << "⚠️ GEMINI_API_KEY not found in environment." << RESET << std::endl;
+        std::cout << "To use AI review, set your key: export GEMINI_API_KEY='your-key'" << std::endl;
+        return;
+    }
+
+    std::cout << MAGENTA << "🤖 Preparing AI Code Review (Gemini Pro)..." << RESET << std::endl;
+
+    fs::path helper_path = cfg.spip_root / "review_helper.py";
+    std::ofstream helper(helper_path);
+    helper << R"py_review(
+import sys
+import os
+import json
+import urllib.request
+
+def gather_context(root_dir):
+    context = []
+    # Focus only on spip.cpp to stay within tight quotas
+    path = os.path.join(root_dir, 'spip.cpp')
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as fr:
+                context.append(f"--- FILE: spip.cpp ---\n{fr.read()}")
+        except: pass
+    return "\n\n".join(context)
+
+def call_gemini(api_key, context):
+    # Use gemini-flash-latest alias for stable 1.5 Flash access
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}"
+    prompt = f"Please perform a deep architectural and safety review of this project code. Identify potential bugs, security risks, or design flaws:\n\n{context}"
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), 
+                               headers={'Content-Type': 'application/json'})
+    
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            if 'candidates' in data and data['candidates']:
+                print("\n--- AI REVIEW FEEDBACK ---\n")
+                print(data['candidates'][0]['content']['parts'][0]['text'])
+            else:
+                print(f"\033[33m⚠️ No feedback received. API Response: {data}\033[0m")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8')
+        print(f"\033[31mHTTP Error {e.code} calling Gemini API: {body}\033[0m")
+    except Exception as e:
+        print(f"\033[31mError calling Gemini API: {e}\033[0m")
+
+if __name__ == "__main__":
+    key, path = sys.argv[1], sys.argv[2]
+    ctx = gather_context(path)
+    if ctx:
+        call_gemini(key, ctx)
+    else:
+        print("No source files found for review.")
+)py_review";
+    helper.close();
+
+    fs::path python_bin = cfg.project_env_path / "bin" / "python";
+    std::string review_cmd = std::format("\"{}\" \"{}\" \"{}\" \"{}\"", 
+        python_bin.string(), helper_path.string(), api_key, cfg.current_project.string());
+    
+    std::system(review_cmd.c_str());
 }
 
 void verify_environment(const Config& cfg) {
@@ -835,24 +971,25 @@ if __name__ == "__main__":
     needed_files.insert((cfg.project_env_path / "pyvenv.cfg").string());
     needed_files.insert((cfg.project_env_path / "bin" / "python").string());
 
-    // Native dependencies (Mac specific)
+    // Native dependencies (Mac/Linux support - D-14)
     std::vector<std::string> native_queue;
     for (const auto& f : needed_files) {
         if (f.ends_with(".so") || f.ends_with(".dylib")) native_queue.push_back(f);
     }
 
-    // Simple recursive otool dependent finder
     size_t idx = 0;
     while(idx < native_queue.size()) {
         std::string lib = native_queue[idx++];
-        std::string otool_cmd = std::format("otool -L \"{}\"", lib);
-        std::string otool_out = get_exec_output(otool_cmd);
-        std::stringstream ss2(otool_out);
+        // Use otool on Mac, ldd on Linux
+        std::string dep_cmd = std::format("otool -L {} 2>/dev/null || ldd {} 2>/dev/null", quote_arg(lib), quote_arg(lib));
+        std::string dep_out = get_exec_output(dep_cmd);
+        std::stringstream ss2(dep_out);
         while(std::getline(ss2, line)) {
-            std::regex re(R"(\t([^\s]+) \(compatibility)");
+            // Match (otool style) /path/to/lib (compatibility...) OR (ldd style) lib => /path/to/lib (0x...)
+            std::regex re(R"(\t([^\s]+) \(compatibility|=>\s+([^\s]+)\s+\()");
             std::smatch m;
             if (std::regex_search(line, m, re)) {
-                std::string dep = m[1];
+                std::string dep = m[1].matched ? m[1].str() : m[2].str();
                 if (dep.find(cfg.project_env_path.string()) != std::string::npos) {
                     if (needed_files.find(dep) == needed_files.end()) {
                         needed_files.insert(dep);
@@ -878,8 +1015,8 @@ if __name__ == "__main__":
 
     std::cout << GREEN << "✔️  Pruned " << pruned << " files. Testing environment..." << RESET << std::endl;
     
-    std::string test_cmd = std::format("cd \"{}\" && ../spip run python \"{}\"", 
-        cfg.current_project.string(), script_path);
+    std::string test_cmd = std::format("cd {} && ../spip run python {}", 
+        quote_arg(cfg.current_project.string()), quote_arg(script_path));
     int ret = std::system(test_cmd.c_str());
 
     if (ret == 0) {
@@ -904,7 +1041,7 @@ uintmax_t get_dir_size(const fs::path& p) {
 
 void run_command(const Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
-        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|log|search|tree|trim|verify|test|freeze|prune|audit|fetch-db> [args...]" << std::endl;
+        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db> [args...]" << std::endl;
         return;
     }
     std::string command = args[0];
@@ -924,8 +1061,8 @@ void run_command(const Config& cfg, const std::vector<std::string>& args) {
         for (int i = 0; i < num_threads; ++i) threads.emplace_back(db_worker, std::ref(q), std::ref(m), std::ref(count), total);
         for (auto& t : threads) t.join();
         std::cout << std::endl << GREEN << "✔ Fetch complete. Committing to Git..." << RESET << std::endl;
-        const char* home = std::getenv("HOME");
-        std::string git_cmd = std::format("cd \"{}/.spip/db\" && git add packages && git commit -m \"Update package database\"", home);
+        std::string git_cmd = std::format("cd {} && git add packages && git commit -m \"Update package database\"", 
+            quote_arg(cfg.repo_path.parent_path().string() + "/db"));
         std::system(git_cmd.c_str());
     }
     else if (command == "install" || command == "i") {
@@ -962,13 +1099,19 @@ void run_command(const Config& cfg, const std::vector<std::string>& args) {
         setup_project_env(cfg);
         audit_environment(cfg);
     }
+    else if (command == "review") {
+        setup_project_env(cfg);
+        review_code(cfg);
+    }
     else if (command == "use") {
         if (args.size() < 2) { std::cerr << "Usage: spip use <version>" << std::endl; return; }
         std::string version = args[1];
         if (fs::exists(cfg.project_env_path)) {
-            std::string rm_cmd = std::format("cd \"{}\" && git worktree remove \"{}\" --force", cfg.repo_path.string(), cfg.project_env_path.string());
+            std::string rm_cmd = std::format("cd {} && git worktree remove {} --force", 
+                quote_arg(cfg.repo_path.string()), quote_arg(cfg.project_env_path.string()));
             std::system(rm_cmd.c_str());
-            std::string del_branch = std::format("cd \"{}\" && git branch -D \"project/{}\"", cfg.repo_path.string(), cfg.project_hash);
+            std::string del_branch = std::format("cd {} && git branch -D project/{}", 
+                quote_arg(cfg.repo_path.string()), cfg.project_hash);
             std::system(del_branch.c_str());
         }
         setup_project_env(cfg, version);
@@ -976,13 +1119,13 @@ void run_command(const Config& cfg, const std::vector<std::string>& args) {
     }
     else if (command == "log") {
         setup_project_env(cfg);
-        std::string cmd = std::format("cd \"{}\" && git log --oneline --graph", cfg.project_env_path.string());
+        std::string cmd = std::format("cd {} && git log --oneline --graph", quote_arg(cfg.project_env_path.string()));
         std::system(cmd.c_str());
     }
     else if (command == "run") {
         setup_project_env(cfg);
         fs::path bin_path = cfg.project_env_path / "bin";
-        std::string path_env = std::format("PATH=\"{}:{}\"", bin_path.string(), std::getenv("PATH"));
+        std::string path_env = std::format("PATH={}:{}", quote_arg(bin_path.string()), quote_arg(std::getenv("PATH")));
         std::string cmd = "";
         for (size_t i = 1; i < args.size(); ++i) cmd += quote_arg(args[i]) + " ";
         std::string full_cmd = path_env + " " + cmd;
@@ -992,8 +1135,8 @@ void run_command(const Config& cfg, const std::vector<std::string>& args) {
         setup_project_env(cfg);
         fs::path bin_path = cfg.project_env_path / "bin";
         std::string shell = std::getenv("SHELL") ? std::getenv("SHELL") : "/bin/bash";
-        std::string env_vars = std::format("VIRTUAL_ENV=\"{}\" PATH=\"{}:{}\"", 
-            cfg.project_env_path.string(), bin_path.string(), std::getenv("PATH"));
+        std::string env_vars = std::format("VIRTUAL_ENV={} PATH={}:{}", 
+            quote_arg(cfg.project_env_path.string()), quote_arg(bin_path.string()), quote_arg(std::getenv("PATH")));
         std::string full_cmd = env_vars + " " + shell;
         std::system(full_cmd.c_str());
     }

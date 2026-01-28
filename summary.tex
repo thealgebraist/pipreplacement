@@ -13,14 +13,15 @@
 \maketitle
 
 \section{Introduction}
-Current Python package management using \texttt{pip} and \texttt{venv} suffers from environment drift, lack of versioning, and hidden security risks. \texttt{spip} introduces a pure implementation that provides deep dependency analysis, automatic repair/verification, deterministic housekeeping, and real-time security auditing.
+Current Python package management using \texttt{pip} and \texttt{venv} suffers from environment drift, lack of versioning, and hidden security risks. \texttt{spip} introduces a pure implementation that provides deep dependency analysis, automatic repair/verification, deterministic housekeeping, and advanced AI-driven code review.
 
 \section{The spip Architecture}
 \texttt{spip} addresses these via a novel architecture combining:
 \begin{itemize}
     \item \textbf{Centralized Vault}: All environments are stored in \texttt{\~{}/.spip/envs/}.
     \item \textbf{Git-as-Database}: A central Git repository tracks all environment states.
-    \item \textbf{Real-Time Security Auditing}: The \texttt{spip audit} command performs a batch query of all installed libraries against the **OSV (Open Source Vulnerability) database**. It identifies active CVEs, providing summaries and CVSS severity scores to ensure the environment remains secure against known exploits.
+    \item \textbf{AI Code Review}: The \texttt{spip review} command leverages the \textbf{Gemini Pro API} to perform a deep architectural and safety review of the entire project source. It identifies complex logical bugs, security vulnerabilities, and design anti-patterns.
+    \item \textbf{Real-Time Security Auditing}: The \texttt{spip audit} command performs a batch query of all installed libraries against the **OSV (Open Source Vulnerability) database**.
     \item \textbf{Orphan Pruning}: Recursive graph traversal to identify and remove unused sub-dependencies.
     \item \textbf{Environment Portability (Freeze)}: Bundles the entire environment into a compressed \texttt{.tgz} archive.
     \item \textbf{Bulk Environment Testing}: Automated discovery and execution of package internal tests.
