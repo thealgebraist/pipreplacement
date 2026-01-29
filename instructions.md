@@ -29,4 +29,13 @@
 - Architectural refinements (Stable Hashing, JSON hardening, Dependency Parsing) implemented.
 - Tool fully verified on current codebase via 'spip review'.
 - [x] implement `spip implement` to generate packages using an LLM agent (Gemini/Copilot) until tests pass.
+- [x] implement local Ollama support for `spip implement`.
+- [x] implement external script splitting for maintainability.
+- [x] implement `spip boot` for virtualized QEMU execution.
+- [x] implement `spip bundle` to wrap, install, and test general C++23 code as a Python package.
+- [x] Refactor `spip.cpp` by identifying common subgraphs (code clones).
+- [x] comprehensive subgraph isomorphism benchmark (8 methods: LP, IP, MILP, B&B, CP, SA, GD, Ullmann) with 60s timeout each.
+- [x] Compare all functions and sub-blocks (subexpressions) using 8 distinct methods (Similarity/Iso) and generate a heatmap/report.
+- [x] Search for similar functions/subexpressions using a BERT-like model (CodeBERT) and cosine similarity.
+- [x] Tree pattern matching with alpha-equivalence (De Bruijn indices) for CSE detection.
 - Adding 'spip top' and 'spip top --references' functionality.

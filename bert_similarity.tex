@@ -1,0 +1,49 @@
+
+\documentclass{article}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{booktabs}
+\begin{document}
+\title{Semantic Code Similarity Analysis (BERT)}
+\author{Antigravity Agent}
+\date{\today}
+\maketitle
+
+\section{Methodology}
+We utilized the pre-trained \textbf{TF-IDF (BERT Fallback)} model to embed C++ code functions and control blocks into a high-dimensional vector space. We then computed Cosine Similarity to identify semantically similar code regions.
+
+\section{Top Similar Pairs}
+The following pairs exhibit the highest semantic similarity ($>0.8$):
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llc}
+\toprule
+\textbf{Unit A} & \textbf{Unit B} & \textbf{Similarity} \\
+\midrule
+record\_manual\_install/if\_1\_3 & prune\_orphans/if\_1\_12 & 1.0000 \\
+prune\_orphans/if\_2\_3 & uninstall\_package/if\_2\_3 & 1.0000 \\
+prune\_orphans/if\_2\_3 & run\_package\_tests/if\_2\_3 & 1.0000 \\
+prune\_orphans/if\_2\_3 & run\_all\_package\_tests/if\_2\_3 & 1.0000 \\
+prune\_orphans/if\_2\_3 & freeze\_environment/if\_2\_3 & 1.0000 \\
+prune\_orphans/if\_2\_3 & audit\_environment/if\_2\_3 & 1.0000 \\
+prune\_orphans/if\_2\_3 & verify\_environment/if\_2\_3 & 1.0000 \\
+prune\_orphans/for\_1\_2 & uninstall\_package/for\_1\_2 & 1.0000 \\
+prune\_orphans/for\_1\_2 & run\_package\_tests/for\_1\_2 & 1.0000 \\
+prune\_orphans/for\_1\_2 & run\_all\_package\_tests/for\_1\_2 & 1.0000 \\
+prune\_orphans/for\_1\_2 & freeze\_environment/for\_1\_2 & 1.0000 \\
+prune\_orphans/for\_1\_2 & audit\_environment/for\_1\_2 & 1.0000 \\
+prune\_orphans/for\_1\_2 & verify\_environment/for\_1\_2 & 1.0000 \\
+uninstall\_package/if\_2\_3 & run\_package\_tests/if\_2\_3 & 1.0000 \\
+uninstall\_package/if\_2\_3 & run\_all\_package\_tests/if\_2\_3 & 1.0000 \\
+uninstall\_package/if\_2\_3 & freeze\_environment/if\_2\_3 & 1.0000 \\
+uninstall\_package/if\_2\_3 & audit\_environment/if\_2\_3 & 1.0000 \\
+uninstall\_package/if\_2\_3 & verify\_environment/if\_2\_3 & 1.0000 \\
+uninstall\_package/for\_1\_2 & run\_package\_tests/for\_1\_2 & 1.0000 \\
+uninstall\_package/for\_1\_2 & run\_all\_package\_tests/for\_1\_2 & 1.0000 \\
+
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

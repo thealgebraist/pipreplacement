@@ -1,36 +1,49 @@
 \documentclass{article}
-\usepackage[utf8]{inputenc}
-\usepackage{hyperref}
-\usepackage{listings}
-\usepackage{xcolor}
-
-\title{spip: A Secure and Version-Controlled Pip Replacement}
-\author{Antigravity}
-\date{January 2026}
-
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
 \begin{document}
-
+\title{Subgraph Isomorphism Refactoring Analysis}
+\author{Antigravity Agent}
+\date{\today}
 \maketitle
 
-\section{Security Hardening and Architectural Evolution}
-Following a deep architectural review performed by the integrated Gemini Pro AI, \texttt{spip} has undergone significant evolution to resolve critical security and design flaws.
+\section{Methodology}
+We performed a structural analysis of the \texttt{spip.cpp} codebase to identify repeated code patterns (code clones) using a subgraph isomorphism approach. We employed:
+\begin{enumerate}
+    \item \textbf{Gradient Descent Isomorphism Solver}: To detecting variations of the same structure.
+    \item \textbf{Constraint-Based Matching}: Using basic block histograms and sequence alignment.
+\end{enumerate}
 
-\section{Implemented Security Fixes}
+\section{Findings}
+The analysis identified a massive redundancy regarding the resolution of the \texttt{site-packages} directory. The following subgraph (representing a recursive directory search) was found repeated 8 times across different functions:
+
+\begin{verbatim}
+    fs::path site_packages;
+    for (const auto& entry : fs::recursive_directory_iterator(cfg.project_env_path)) {
+        if (entry.is_directory() && entry.path().filename() == "site-packages") {
+            site_packages = entry.path();
+            break;
+        }
+    }
+\end{verbatim}
+
+\textbf{Affected Functions:}
 \begin{itemize}
-    \item \textbf{Shell Injection Prevention}: Implemented a universal \texttt{quote\_arg} sanitizer that escapes backslashes, double quotes, and dollar signs. This is now enforced on every \texttt{std::system} and \texttt{popen} call.
-    \item \textbf{Safe Wheel Extraction}: Replaced the legacy \texttt{unzip} command with a Python-based \texttt{safe\_extract.py} helper. This script explicitly validates ZIP member paths to prevent path traversal attacks.
-    \item \textbf{Stable Project Hashing}: Replaced \texttt{std::hash} with a deterministic FNV-1a mixing algorithm to ensure consistent project IDs and prevent environment collisions.
+    \item \texttt{resolve\_and\_install}
+    \item \texttt{prune\_orphans}
+    \item \texttt{uninstall\_package}
+    \item \texttt{run\_package\_tests}
+    \item \texttt{run\_all\_package\_tests}
+    \item \texttt{freeze\_environment}
+    \item \texttt{audit\_environment}
+    \item \texttt{verify\_environment}
 \end{itemize}
 
-\section{Architectural Refinements}
-\begin{itemize}
-    \item \textbf{Recursive Cleanup}: The \texttt{uninstall} and \texttt{prune} logic now recursively removes empty parent directories, ensuring zero bloat.
-    \item \textbf{Cross-Platform Portability}: Native dependency tracing in \texttt{trim} now supports both \texttt{otool} (Mac) and \texttt{ldd} (Linux).
-    \item \textbf{Hardened JSON Parsing}: Metadata extraction now uses non-greedy, targeted regular expressions to eliminate ReDoS risk.
-    \item \textbf{Dependency Intelligence}: Improved \texttt{requires\_dist} parsing for better handling of versioned constraints and platform markers.
-\end{itemize}
-
-\section{Verification}
-The tool has been self-audited using \texttt{spip review} and verified to be safe and robust against common environment drift and security vulnerabilities.
+\section{Action}
+We refactored this common subgraph into a dedicated helper function:
+\begin{verbatim}
+fs::path get_site_packages(const Config& cfg);
+\end{verbatim}
+This reduces code duplication and improves maintainability by localizing the environment discovery logic.
 
 \end{document}

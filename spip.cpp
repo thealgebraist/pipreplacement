@@ -99,9 +99,33 @@ Config init_config() {
     return cfg;
 }
 
+void ensure_scripts(const Config& cfg) {
+    fs::path scripts_dir = cfg.spip_root / "scripts";
+    if (!fs::exists(scripts_dir)) fs::create_directories(scripts_dir);
+    
+    // In a real install, these would be bundled. For now, we assume they are in the project scripts/ dir.
+    // If not found in project scripts/, we don't overwrite if they exist in spip_root/scripts.
+    std::vector<std::string> script_names = {
+        "safe_extract.py", "audit_helper.py", "review_helper.py", 
+        "verify_helper.py", "trim_helper.py", "agent_helper.py"
+    };
+    
+    fs::path project_scripts = fs::current_path() / "scripts";
+    if (fs::exists(project_scripts)) {
+        for (const auto& name : script_names) {
+            fs::path src = project_scripts / name;
+            fs::path dst = scripts_dir / name;
+            if (fs::exists(src)) {
+                fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
+            }
+        }
+    }
+}
+
 void ensure_dirs(const Config& cfg) {
     if (!fs::exists(cfg.spip_root)) fs::create_directories(cfg.spip_root);
     if (!fs::exists(cfg.envs_root)) fs::create_directories(cfg.envs_root);
+    ensure_scripts(cfg);
     if (!fs::exists(cfg.repo_path)) {
         fs::create_directories(cfg.repo_path);
         std::string cmd = std::format("cd {} && git init && git commit --allow-empty -m \"Initial commit\"", quote_arg(cfg.repo_path.string()));
@@ -200,6 +224,35 @@ fs::path get_db_path(const std::string& pkg) {
     std::string p2 = (name.length() > 1) ? name.substr(0, 2) : p1 + "_";
     return db_root / "packages" / p1 / p2 / (name + ".json");
 }
+
+fs::path get_site_packages(const Config& cfg) {
+    if (!fs::exists(cfg.project_env_path)) return fs::path();
+    // Safety: prevent throwing if directory doesn't exist
+    try {
+        for (const auto& entry : fs::recursive_directory_iterator(cfg.project_env_path)) {
+            if (entry.is_directory() && entry.path().filename() == "site-packages") {
+                return entry.path();
+            }
+        }
+    } catch (...) {}
+    return fs::path();
+}
+
+// Helper: Execute command with setup
+void exec_with_setup(Config& cfg, std::function<void(Config&)> func) {
+    setup_project_env(cfg);
+    func(cfg);
+}
+
+// Helper: Validate argument count
+bool require_args(const std::vector<std::string>& args, size_t min_count, const std::string& usage_msg) {
+    if (args.size() < min_count) {
+        std::cout << usage_msg << std::endl;
+        return false;
+    }
+    return true;
+}
+
 
 void benchmark_mirrors(Config& cfg) {
     std::cout << MAGENTA << "🏎  Benchmarking mirrors to find the fastest..." << RESET << std::endl;
@@ -400,13 +453,7 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         installed.insert(lower_name);
         for (const auto& d : info.dependencies) queue.push_back(d);
     }
-    fs::path site_packages;
-    for (const auto& entry : fs::recursive_directory_iterator(cfg.project_env_path)) {
-        if (entry.is_directory() && entry.path().filename() == "site-packages") {
-            site_packages = entry.path();
-            break;
-        }
-    }
+    fs::path site_packages = get_site_packages(cfg);
     if (site_packages.empty()) {
         std::cerr << RED << "❌ Could not find site-packages directory." << RESET << std::endl;
         return;
@@ -439,24 +486,7 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         std::system(dl_cmd.c_str());
         
         // Critical: S-02 Safe Extraction to prevent path traversal
-        fs::path extraction_helper = cfg.spip_root / "safe_extract.py";
-        {
-            std::ofstream oh(extraction_helper);
-            oh << R"py(
-import zipfile, sys, os
-def safe_extract(zip_path, extract_to):
-    with zipfile.ZipFile(zip_path, 'r') as z:
-        for member in z.infolist():
-            # Prevent path traversal
-            if os.path.isabs(member.filename) or '..' in member.filename:
-                print(f"Skipping dangerous member: {member.filename}")
-                continue
-            z.extract(member, extract_to)
-if __name__ == "__main__":
-    if len(sys.argv) < 3: sys.exit(1)
-    safe_extract(sys.argv[1], sys.argv[2])
-)py";
-        }
+        fs::path extraction_helper = cfg.spip_root / "scripts" / "safe_extract.py";
         
         fs::path python_bin = cfg.project_env_path / "bin" / "python";
         std::string extract_cmd = std::format("{} {} {} {}", 
@@ -719,6 +749,48 @@ void run_all_package_tests(const Config& cfg) {
     }
 }
 
+void boot_environment(const Config& cfg, const std::string& script_path) {
+    fs::path boot_dir = cfg.spip_root / "boot";
+    fs::path kernel = boot_dir / "vmlinuz";
+    fs::path initrd = boot_dir / "initrd.img";
+
+    if (!fs::exists(kernel) || !fs::exists(initrd)) {
+        std::cout << YELLOW << "⚠️ Minimal Linux kernel or initrd not found in " << boot_dir << RESET << std::endl;
+        std::cout << "Please place 'vmlinuz' and 'initrd.img' there to use virtualized execution." << std::endl;
+        std::cout << "Suggested minimal kernel: https://github.com/amluto/virtme (or use a buildroot image)." << std::endl;
+        return;
+    }
+
+    std::cout << MAGENTA << "🚀 Booting virtualized environment for " << script_path << "..." << RESET << std::endl;
+
+    // Constructed QEMU command
+    // -virtfs for 9p sharing of the environment
+    // -append for kernel parameters (mount 9p, run script)
+    
+    std::string accel = "";
+#ifdef __APPLE__
+    accel = "-accel hvf -cpu host";
+#else
+    accel = "-accel kvm -cpu host";
+#endif
+
+    // We share the project environment path and the current project path (for the script)
+    std::string qemu_cmd = std::format(
+        "qemu-system-x86_64 {} -m 1G -nographic "
+        "-kernel {} -initrd {} "
+        "-virtfs local,path={},mount_tag=spip_env,security_model=none,id=spip_env "
+        "-virtfs local,path={},mount_tag=project_root,security_model=none,id=project_root "
+        "-append \"console=ttyS0 root=/dev/ram0 rw init=/sbin/init spip_script={}\" ",
+        accel, quote_arg(kernel.string()), quote_arg(initrd.string()),
+        quote_arg(cfg.project_env_path.string()), 
+        quote_arg(cfg.current_project.string()),
+        quote_arg(script_path)
+    );
+
+    std::cout << CYAN << "QEMU Command: " << qemu_cmd << RESET << std::endl;
+    std::system(qemu_cmd.c_str());
+}
+
 void freeze_environment(const Config& cfg, const std::string& output_file) {
     fs::path site_packages;
     for (const auto& entry : fs::recursive_directory_iterator(cfg.project_env_path)) {
@@ -757,81 +829,7 @@ void audit_environment(const Config& cfg) {
 
     std::cout << MAGENTA << "🛡 Performing security audit (OSV API)..." << RESET << std::endl;
 
-    fs::path helper_path = cfg.spip_root / "audit_helper.py";
-    std::ofstream helper(helper_path);
-    helper << R"py_audit(
-import sys
-import os
-import json
-import urllib.request
-
-def get_installed_packages(sp_path):
-    packages = []
-    for entry in os.listdir(sp_path):
-        if entry.endswith(".dist-info"):
-            metadata_path = os.path.join(sp_path, entry, "METADATA")
-            if os.path.exists(metadata_path):
-                name, version = None, None
-                with open(metadata_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    for line in f:
-                        if line.startswith("Name:"): name = line.split(":", 1)[1].strip()
-                        if line.startswith("Version:"): version = line.split(":", 1)[1].strip()
-                if name and version:
-                    packages.append({"name": name, "version": version})
-    return packages
-
-def audit_packages(packages):
-    if not packages: return
-    
-    url = "https://api.osv.dev/v1/querybatch"
-    queries = []
-    for p in packages:
-        # Normalize name for OSV
-        queries.append({
-            "package": {"name": p["name"].lower(), "ecosystem": "PyPI"},
-            "version": p["version"]
-        })
-    
-    data = json.dumps({"queries": queries}).encode('utf-8')
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-    
-    try:
-        with urllib.request.urlopen(req) as resp:
-            results = json.loads(resp.read().decode('utf-8')).get('results', [])
-            
-            found_any = False
-            for i, res in enumerate(results):
-                vulns = res.get('vulns', [])
-                if vulns:
-                    found_any = True
-                    p = packages[i]
-                    print(f"\n\033[31m❌ {p['name']} ({p['version']}) has {len(vulns)} vulnerabilities!\033[0m")
-                    for v in vulns:
-                        cvss = ""
-                        for s in v.get('severity', []):
-                            if s.get('type') == 'CVSS_V3': cvss = f" [CVSS {s.get('score')}]"
-                        desc = v.get('summary')
-                        if not desc:
-                            desc = v.get('details', 'No description available').split('\n')[0]
-                        if len(desc) > 80: desc = desc[:77] + "..."
-                        print(f"  - {v.get('id')}: {desc}{cvss}")
-            
-            if not found_any:
-                print("\033[32m✨ No known vulnerabilities found for installed packages.\033[0m")
-            
-            print("\nAudit Summary (Verified Libraries):")
-            for p in packages:
-                print(f"  - {p['name']} ({p['version']})")
-                
-    except Exception as e:
-        print(f"\033[31mError querying OSV API: {e}\033[0m")
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2: sys.exit(1)
-    pkgs = get_installed_packages(sys.argv[1])
-    audit_packages(pkgs)
-)py_audit";
-    helper.close();
+    fs::path helper_path = cfg.spip_root / "scripts" / "audit_helper.py";
 
     fs::path python_bin = cfg.project_env_path / "bin" / "python";
     std::string audit_cmd = std::format("\"{}\" \"{}\" \"{}\"", 
@@ -850,62 +848,7 @@ void review_code(const Config& cfg) {
 
     std::cout << MAGENTA << "🤖 Preparing AI Code Review (Gemini Pro)..." << RESET << std::endl;
 
-    fs::path helper_path = cfg.spip_root / "review_helper.py";
-    std::ofstream helper(helper_path);
-    helper << R"py_review(
-import sys
-import os
-import json
-import urllib.request
-
-def gather_context(root_dir):
-    context = []
-    # Focus only on spip.cpp to stay within tight quotas
-    path = os.path.join(root_dir, 'spip.cpp')
-    if os.path.exists(path):
-        try:
-            with open(path, 'r', encoding='utf-8', errors='ignore') as fr:
-                context.append(f"--- FILE: spip.cpp ---\n{fr.read()}")
-        except: pass
-    return "\n\n".join(context)
-
-def call_gemini(api_key, context):
-    # Use gemini-flash-latest alias for stable 1.5 Flash access
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}"
-    prompt = f"Please perform a deep architectural and safety review of this project code. Identify potential bugs, security risks, or design flaws:\n\n{context}"
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
-    
-    req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), 
-                               headers={'Content-Type': 'application/json'})
-    
-    try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            if 'candidates' in data and data['candidates']:
-                print("\n--- AI REVIEW FEEDBACK ---\n")
-                print(data['candidates'][0]['content']['parts'][0]['text'])
-            else:
-                print(f"\033[33m⚠️ No feedback received. API Response: {data}\033[0m")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode('utf-8')
-        print(f"\033[31mHTTP Error {e.code} calling Gemini API: {body}\033[0m")
-    except Exception as e:
-        print(f"\033[31mError calling Gemini API: {e}\033[0m")
-
-if __name__ == "__main__":
-    key, path = sys.argv[1], sys.argv[2]
-    ctx = gather_context(path)
-    if ctx:
-        call_gemini(key, ctx)
-    else:
-        print("No source files found for review.")
-)py_review";
-    helper.close();
+    fs::path helper_path = cfg.spip_root / "scripts" / "review_helper.py";
 
     fs::path python_bin = cfg.project_env_path / "bin" / "python";
     std::string review_cmd = std::format("\"{}\" \"{}\" \"{}\" \"{}\"", 
@@ -926,90 +869,7 @@ void verify_environment(const Config& cfg) {
 
     std::cout << MAGENTA << "🔍 Verifying environment integrity (Syntax + Types)..." << RESET << std::endl;
 
-    fs::path helper_path = cfg.spip_root / "verify_helper.py";
-    std::ofstream helper(helper_path);
-    helper << R"py_verify(
-import sys
-import os
-import ast
-import subprocess
-import warnings
-import re
-
-def check_syntax(sp_path):
-    warnings.simplefilter('error', SyntaxWarning)
-    errors = []
-    for root, _, files in os.walk(sp_path):
-        for f in files:
-            if f.endswith('.py'):
-                full = os.path.join(root, f)
-                for attempt in range(32):
-                    try:
-                        with open(full, 'rb') as src:
-                            content = src.read()
-                            if b'\x00' in content: break # Skip binary-ish files
-                            ast.parse(content, filename=full)
-                        break
-                    except (SyntaxWarning, SyntaxError, Warning) as w:
-                        msg = str(w)
-                        match = re.search(r"invalid escape sequence ['\"](\\[^'\"])['\"]", msg)
-                        if not match:
-                            match = re.search(r"['\"](\\[^'\"])['\"] is an invalid escape sequence", msg)
-                        line_match = re.search(r"line (\d+)", msg)
-                        if match:
-                            seq = match.group(1)
-                            print(f"  🔧 Auto-repairing {full} ({seq})...")
-                            try:
-                                with open(full, 'r', encoding='utf-8', errors='ignore') as fr:
-                                    lines = fr.readlines()
-                                if line_match:
-                                    l_idx = int(line_match.group(1)) - 1
-                                    if 0 <= l_idx < len(lines):
-                                        lines[l_idx] = lines[l_idx].replace(seq, "\\" + seq)
-                                else:
-                                    for i in range(len(lines)):
-                                        lines[i] = lines[i].replace(seq, "\\" + seq)
-                                with open(full, 'w', encoding='utf-8') as fw:
-                                    fw.writelines(lines)
-                            except: pass
-                        else:
-                            if "aiohttp" in full: # Temporary tolerance for aiohttp quirks
-                                print(f"  ⚠️ Warning: Syntax issue in {f} (aiohttp), skipping...")
-                                break
-                            text = getattr(w, 'text', '') or ''
-                            lineno = getattr(w, 'lineno', '?')
-                            errors.append(f"Validation Failure: {full}:{lineno}\n  {msg}\n  {text}")
-                            break
-                    except Exception as e:
-                        errors.append(f"Syntax Error: {full}\n  {e}")
-                        break
-    return errors
-
-def check_types(sp_path, bin_path):
-    print("  Running recursive type-existence check...")
-    import importlib.util
-    if importlib.util.find_spec("mypy") is None:
-        print("  ⚠️ mypy not found in environment. Installing...")
-        subprocess.run([os.path.join(bin_path, "python"), "-m", "pip", "install", "mypy"], 
-                       capture_output=True, check=True)
-        print("  ✔️ mypy installed successfully.")
-    
-    mypy_cmd = [os.path.join(bin_path, "python"), "-m", "mypy", 
-                "--ignore-missing-imports", "--follow-imports=normal", sp_path]
-    res = subprocess.run(mypy_cmd, capture_output=True, text=True)
-    return res.stdout if res.returncode != 0 else ""
-
-if __name__ == "__main__":
-    sp, bp = sys.argv[1], sys.argv[2]
-    syntax_errs = check_syntax(sp)
-    if syntax_errs:
-        print("\n".join(syntax_errs))
-        sys.exit(1)
-    type_errs = check_types(sp, bp)
-    if type_errs:
-        print("\n--- Type/Attribute Verification Failures ---\n", type_errs)
-)py_verify";
-    helper.close();
+    fs::path helper_path = cfg.spip_root / "scripts" / "verify_helper.py";
 
     fs::path python_bin = cfg.project_env_path / "bin" / "python";
     std::string verify_cmd = std::format("{} {} {} {}", 
@@ -1044,28 +904,7 @@ void trim_environment(const Config& cfg, const std::string& script_path) {
     std::system(branch_cmd.c_str());
 
     // Discovery helper script
-    fs::path helper_path = cfg.spip_root / "trim_helper.py";
-    std::ofstream helper(helper_path);
-    helper << R"(
-import sys
-import os
-import modulefinder
-
-def get_deps(script):
-    finder = modulefinder.ModuleFinder()
-    finder.run_script(script)
-    res = []
-    for name, mod in finder.modules.items():
-        if mod.__file__:
-            res.append(os.path.abspath(mod.__file__))
-    return res
-
-if __name__ == "__main__":
-    deps = get_deps(sys.argv[1])
-    for d in deps:
-        print(d)
-)";
-    helper.close();
+    fs::path helper_path = cfg.spip_root / "scripts" / "trim_helper.py";
 
     fs::path python_bin = cfg.project_env_path / "bin" / "python";
     std::string analyze_cmd = std::format("\"{}\" \"{}\" \"{}\"", 
@@ -1201,13 +1040,125 @@ void show_top_packages(bool refs) {
     }
 }
 
+void bundle_package(const Config& cfg, const std::string& path) {
+    fs::path target_dir = fs::absolute(path);
+    if (!fs::exists(target_dir) || !fs::is_directory(target_dir)) {
+        std::cerr << RED << "❌ Target directory not found: " << path << RESET << std::endl;
+        return;
+    }
+
+    std::string pkg_name = target_dir.filename().string();
+    std::cout << MAGENTA << "📦 Bundling C++23 package '" << pkg_name << "' from " << target_dir.string() << "..." << RESET << std::endl;
+
+    // 1. Generate setup.py if it doesn't exist
+    fs::path setup_path = target_dir / "setup.py";
+    if (!fs::exists(setup_path)) {
+        std::cout << CYAN << "📝 Generating setup.py..." << RESET << std::endl;
+        std::vector<std::string> cpp_files;
+        std::vector<std::string> py_files;
+        std::string test_file;
+        
+        for (const auto& entry : fs::directory_iterator(target_dir)) {
+            if (entry.path().extension() == ".cpp") {
+                cpp_files.push_back(entry.path().filename().string());
+            } else if (entry.path().extension() == ".py") {
+                std::string fname = entry.path().filename().string();
+                if (fname != "setup.py") {
+                    if (fname.find("test") != std::string::npos) test_file = fname;
+                    else py_files.push_back(fname.substr(0, fname.length() - 3));
+                }
+            }
+        }
+
+        if (cpp_files.empty()) {
+             std::cerr << RED << "❌ No .cpp files found in " << target_dir.string() << RESET << std::endl;
+             return;
+        }
+
+        std::ofstream os(setup_path);
+        os << "from setuptools import setup, Extension\n";
+        os << "import os\n\n";
+        os << "module = Extension('" << pkg_name << "_cpp',\n";
+        os << "    sources=[";
+        for (size_t i = 0; i < cpp_files.size(); ++i) {
+            os << "'" << cpp_files[i] << "'" << (i == cpp_files.size() - 1 ? "" : ", ");
+        }
+        os << "],\n";
+        os << "    extra_compile_args=['-std=c++23']\n";
+        os << ")\n\n";
+        os << "setup(\n";
+        os << "    name='" << pkg_name << "',\n";
+        os << "    version='0.1',\n";
+        os << "    ext_modules=[module],\n";
+        os << "    py_modules=[";
+        for (size_t i = 0; i < py_files.size(); ++i) {
+            os << "'" << py_files[i] << "'" << (i == py_files.size() - 1 ? "" : ", ");
+        }
+        os << "],\n";
+        os << ")\n";
+        os.close();
+        std::cout << GREEN << "✔️  Created setup.py." << RESET << std::endl;
+    }
+
+    // 2. Install into current environment
+    setup_project_env(cfg);
+    
+    fs::path python_bin = cfg.project_env_path / "bin" / "python";
+    
+    // Ensure pip is installed
+    std::string check_pip = std::format("{} -m pip --version >/dev/null 2>&1", quote_arg(python_bin.string()));
+    if (std::system(check_pip.c_str()) != 0) {
+        std::cout << YELLOW << "⚠️ pip not found. Installing via ensurepip..." << RESET << std::endl;
+        std::string install_pip = std::format("{} -m ensurepip --upgrade", quote_arg(python_bin.string()));
+        std::system(install_pip.c_str());
+    }
+
+    std::cout << BLUE << "🚀 Installing package..." << RESET << std::endl;
+    std::string install_cmd = std::format("cd {} && {} -m pip install .", 
+        quote_arg(target_dir.string()), quote_arg(python_bin.string()));
+    
+    int ret = std::system(install_cmd.c_str());
+    if (ret != 0) {
+        std::cerr << RED << "❌ Installation failed." << RESET << std::endl;
+        return;
+    }
+    std::cout << GREEN << "✔️  Package installed successfully." << RESET << std::endl;
+
+    // 3. Run test if found
+    std::string test_file;
+    for (const auto& entry : fs::directory_iterator(target_dir)) {
+        if (entry.path().extension() == ".py" && entry.path().filename().string().find("test") != std::string::npos) {
+            test_file = entry.path().filename().string();
+            break;
+        }
+    }
+
+    if (!test_file.empty()) {
+        std::cout << MAGENTA << "🧪 Running test: " << test_file << "..." << RESET << std::endl;
+        std::string test_cmd = std::format("cd {} && {} {}", 
+            quote_arg(target_dir.string()), quote_arg(python_bin.string()), quote_arg(test_file));
+        std::system(test_cmd.c_str());
+    } else {
+        std::cout << YELLOW << "⚠️ No test file found (looked for *test*.py)." << RESET << std::endl;
+    }
+}
+
 void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
-        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement> [args...]" << std::endl;
+        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle> [args...]" << std::endl;
         return;
     }
     std::string command = args[0];
-    if (command == "fetch-db") {
+    if (command == "bundle") {
+        if (!require_args(args, 2, "Usage: spip bundle <folder>")) return;
+        bundle_package(cfg, args[1]);
+    }
+    else if (command == "boot") {
+        if (!require_args(args, 2, "Usage: spip boot <script.py>")) return;
+        setup_project_env(cfg);
+        boot_environment(cfg, args[1]);
+    }
+    else if (command == "fetch-db") {
         init_db();
         benchmark_mirrors(cfg);
         std::ifstream file("all_packages.txt");
@@ -1274,185 +1225,36 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         std::cout << GREEN << "✔ Uninstall committed to Git." << RESET << std::endl;
     }
     else if (command == "prune") {
-        setup_project_env(cfg);
-        prune_orphans(cfg);
+        exec_with_setup(cfg, prune_orphans);
     }
     else if (command == "audit") {
-        setup_project_env(cfg);
-        audit_environment(cfg);
+        exec_with_setup(cfg, audit_environment);
     }
     else if (command == "review") {
-        setup_project_env(cfg);
-        review_code(cfg);
+        exec_with_setup(cfg, review_code);
     }
     else if (command == "implement") {
-        std::string name, desc;
+        std::string name, desc, ollama_model;
         for (size_t i = 1; i < args.size(); ++i) {
             if (args[i] == "--name" && i + 1 < args.size()) name = args[++i];
             else if (args[i] == "--desc" && i + 1 < args.size()) desc = args[++i];
+            else if (args[i] == "--ollama") {
+                if (i + 1 < args.size() && args[i+1].find("--") != 0) ollama_model = args[++i];
+                else ollama_model = "llama3"; // Default if no model specified
+            }
         }
         if (name.empty() || desc.empty()) {
-             std::cout << "Usage: spip implement --name <pkg> --desc \"<description>\"" << std::endl;
+             std::cout << "Usage: spip implement --name <pkg> --desc \"<description>\" [--ollama [model]]" << std::endl;
              return;
         }
         setup_project_env(cfg);
         
-        fs::path agent_path = cfg.spip_root / "agent_helper.py";
-        std::ofstream agent(agent_path);
-        agent << R"py(
-import sys
-import os
-import json
-import subprocess
-import urllib.request
-import urllib.error
-import time
-
-API_KEY = os.getenv("GEMINI_API_KEY")
-API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-
-def call_llm(prompt):
-    if not API_KEY:
-        print("❌ GEMINI_API_KEY environment variable not set. Please export GEMINI_API_KEY.")
-        sys.exit(1)
-    
-    headers = {'Content-Type': 'application/json'}
-    data = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
-    
-    req = urllib.request.Request(f"{API_URL}?key={API_KEY}", 
-                                 data=json.dumps(data).encode('utf-8'), 
-                                 headers=headers)
-    
-    for attempt in range(5):
-        try:
-            with urllib.request.urlopen(req) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                try:
-                    candidates = result.get('candidates', [])
-                    if not candidates: return ""
-                    parts = candidates[0].get('content', {}).get('parts', [])
-                    return parts[0]['text'] if parts else ""
-                except (KeyError, IndexError):
-                    return ""
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                print(f"⏳ Rate limited. Retrying in 60 seconds...")
-                time.sleep(60)
-                continue
-            print(f"❌ API Request failed: {e}")
-            try:
-                print(e.read().decode('utf-8'))
-            except: pass
-            sys.exit(1)
-    print("❌ Failed after retries.")
-    sys.exit(1)
-
-def parse_code_blocks(response):
-    try:
-        # Try finding JSON block
-        start = response.find("```json")
-        if start != -1:
-            end = response.find("```", start + 7)
-            if end != -1:
-                return json.loads(response[start+7:end])
-        
-        # Try finding raw JSON
-        start = response.find("{")
-        end = response.rfind("}")
-        if start != -1 and end != -1:
-             return json.loads(response[start:end+1])
-    except json.JSONDecodeError:
-        pass
-    return None
-
-def main(pkg_name, description):
-    print(f"🤖  Implementing {pkg_name}...")
-    work_dir = os.path.abspath(f"implemented_packages/{pkg_name}")
-    os.makedirs(work_dir, exist_ok=True)
-    
-    history = ""
-    success = False
-    
-    for attempt in range(5):
-        print(f"🔄 Iteration {attempt + 1}/5...")
-        
-        prompt = f"""
-You are an expert Python developer. Implement a python package named '{pkg_name}'.
-Description: {description}
-
-You must provide the implementation for necessarily 3 files:
-1. '{pkg_name}/__init__.py': The main code implementation.
-2. 'tests/test_basic.py': A comprehensive unit test using 'unittest'.
-3. 'setup.py': A minimal setup.py using setuptools.
-
-Output strictly valid JSON with file paths as keys and file content as values.
-Do NOT use markdown code blocks inside the JSON values.
-Ensure the JSON is valid.
-
-Example Output format:
-{{
-  "{pkg_name}/__init__.py": "def hello(): return 'world'",
-  "tests/test_basic.py": "import unittest\\n...",
-  "setup.py": "from setuptools import setup..."
-}}
-
-Previous attempts/errors:
-{history}
-"""
-        response = call_llm(prompt)
-        files = parse_code_blocks(response)
-        
-        if not files:
-            print("⚠️  Failed to parse LLM response. Retrying...")
-            history += f"\nAttempt {attempt}: Failed to generate valid JSON.\nresponse fragment: {response[:200]}...\n"
-            continue
-
-        for fpath, content in files.items():
-            full_path = os.path.join(work_dir, fpath)
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            with open(full_path, "w") as f:
-                f.write(content)
-        
-        print(f"🧪 Running tests in {work_dir}...")
-        
-        # Run unittest discovery
-        cmd = [sys.executable, "-m", "unittest", "discover", "tests"]
-        proc = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
-        
-        if proc.returncode == 0:
-            print("✅ Tests passed!")
-            success = True
-            break
-        else:
-            print("❌ Tests failed.")
-            print(proc.stderr)
-            history += f"\nAttempt {attempt}: Tests failed.\nOutput:\n{proc.stdout}\n{proc.stderr}\n"
-    
-    if success:
-        print(f"🚀 Package {pkg_name} implemented successfully.")
-        print(f"📦 Installing {pkg_name} locally...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], cwd=work_dir, check=True)
-        print(f"✔ {pkg_name} is now available in the environment.")
-    else:
-        print("💀 Failed to implement package after 5 attempts.")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: agent_helper.py <pkg_name> <description>")
-        sys.exit(1)
-    main(sys.argv[1], sys.argv[2])
-)py";
-        agent.close();
+        fs::path agent_path = cfg.spip_root / "scripts" / "agent_helper.py";
 
         fs::path python_bin = cfg.project_env_path / "bin" / "python";
-        std::string run_cmd = std::format("{} {} {} {}", 
+        std::string run_cmd = std::format("{} {} {} {} {}", 
             quote_arg(python_bin.string()), quote_arg(agent_path.string()), 
-            quote_arg(name), quote_arg(desc));
+            quote_arg(name), quote_arg(desc), quote_arg(ollama_model));
         
         std::system(run_cmd.c_str());
     }
