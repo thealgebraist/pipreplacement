@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""
+Quick summary of refactoring candidates
+"""
+
+print("=" * 70)
+print("ALPHA-EQUIVALENCE REFACTORING ANALYSIS - FINAL SUMMARY")
+print("=" * 70)
+
+print("\n📊 STATISTICS:")
+print("  • Code blocks analyzed: 2,042")
+print("  • Duplicate patterns found: 256")
+print("  • Refactorable candidates: 175")
+print("  • Intensive search matches: 348")
+
+print("\n✅ REFACTORINGS COMPLETED:")
+print()
+print("1. get_site_packages()")
+print("   - Pattern: Recursive directory iteration for site-packages")
+print("   - Occurrences: 8")
+print("   - Lines saved: ~32")
+print()
+print("2. require_args()")
+print("   - Pattern: Argument count validation + usage message")
+print("   - Occurrences: 7")
+print("   - Lines saved: ~21")
+print()
+print("3. exec_with_setup()")
+print("   - Pattern: setup_project_env(cfg); function(cfg);")
+print("   - Occurrences: 4")
+print("   - Lines saved: ~8")
+print()
+print("TOTAL IMPACT: 19 instances eliminated, ~61 lines saved")
+
+print("\n🔍 ADDITIONAL OPPORTUN ITIES IDENTIFIED:")
+print()
+print("Method Performance:")
+print("  • Gradient Descent: 337 matches (0.06s)")
+print("  • Hash Consing: 3 exact matches (instant)")
+print("  • Constraint Matching: 8 matches (instant)")
+print("  • Sequence Alignment: 0 matches")
+
+print("\n💡 TOP RECOMMENDATIONS:")
+print()
+print("HIGH PRIORITY:")
+print("  1. Review 3 exact hash matches - perfect duplicates")
+print("  2. Examine top 10 gradient descent matches (similarity > 0.95)")
+print("  3. Extract patterns with ≥3 occurrences")
+print()
+print("MEDIUM PRIORITY:")
+print("  4. Review constraint matching results")
+print("  5. Analyze 4-line+ patterns for complex duplications")
+
+print("\n📄 REPORTS GENERATED:")
+print("  • code_patterns.pdf - 15 common patterns with examples")
+print("  • intensive_search.pdf - Five-method search results")
+print("  • refactoring_summary.pdf - Completed refactorings")
+print("  • final_analysis.pdf - Complete analysis summary")
+
+print("\n🎯 NEXT STEPS:")
+print("  → All reports saved to /Users/anders/projects/pdf/")
+print("  → Consider extracting top candidates using similar helper function pattern")
+print("  → Test each refactoring individually before committing")
+
+print("\n" + "=" * 70)

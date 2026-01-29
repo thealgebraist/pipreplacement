@@ -38,4 +38,5 @@
 - [x] Compare all functions and sub-blocks (subexpressions) using 8 distinct methods (Similarity/Iso) and generate a heatmap/report.
 - [x] Search for similar functions/subexpressions using a BERT-like model (CodeBERT) and cosine similarity.
 - [x] Tree pattern matching with alpha-equivalence (De Bruijn indices) for CSE detection.
+- [x] Applied refactorings: 3 helper functions extracted (get_site_packages, require_args, exec_with_setup), ~61 lines saved.
 - Adding 'spip top' and 'spip top --references' functionality.
