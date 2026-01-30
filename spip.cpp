@@ -535,11 +535,13 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         std::cout << BLUE << "[" << current << "/" << resolved.size() << "] " << RESET 
                   << "📦 " << BOLD << name << RESET << " (" << info.version << ")..." << std::endl;
         
-        fs::path temp_wheel = cfg.spip_root / (name + ".whl");
-        // Use curl's -# (or --progress-bar) for a cleaner progress bar
-        // info.wheel_url is from PyPI JSON but should still be quoted
-        std::string dl_cmd = std::format("curl -L -# {} -o {}", quote_arg(info.wheel_url), quote_arg(temp_wheel.string()));
-        std::system(dl_cmd.c_str());
+        fs::path temp_wheel = cfg.spip_root / (name + "-" + info.version + ".whl");
+        if (!fs::exists(temp_wheel)) {
+            // Use curl's -# (or --progress-bar) for a cleaner progress bar
+            // info.wheel_url is from PyPI JSON but should still be quoted
+            std::string dl_cmd = std::format("curl -L -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(temp_wheel.string()));
+            std::system(dl_cmd.c_str());
+        }
         
         // Critical: S-02 Safe Extraction to prevent path traversal
         fs::path extraction_helper = cfg.spip_root / "scripts" / "safe_extract.py";
@@ -549,8 +551,6 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
             quote_arg(python_bin.string()), quote_arg(extraction_helper.string()), 
             quote_arg(temp_wheel.string()), quote_arg(site_packages.string()));
         std::system(extract_cmd.c_str());
-        
-        fs::remove(temp_wheel);
     }
 }
 
@@ -1061,6 +1061,74 @@ std::string parse_python_requirement(const std::string& req) {
     return best;
 }
 
+std::map<std::string, PackageInfo> resolve_only(const std::vector<std::string>& targets, const std::string& version = "") {
+    std::vector<std::string> queue = targets;
+    std::set<std::string> visited;
+    std::map<std::string, PackageInfo> resolved;
+    size_t i = 0;
+    while(i < queue.size()) {
+        std::string name = queue[i++];
+        std::string lower_name = name;
+        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+        std::replace(lower_name.begin(), lower_name.end(), '_', '-');
+        std::replace(lower_name.begin(), lower_name.end(), '.', '-');
+        
+        if (visited.count(lower_name)) continue;
+        
+        PackageInfo info = (i == 1 && !version.empty()) ? get_package_info(name, version) : get_package_info(name);
+        if (info.wheel_url.empty()) continue;
+        
+        resolved[lower_name + "-" + info.version] = info;
+        visited.insert(lower_name);
+        for (const auto& d : info.dependencies) queue.push_back(d);
+    }
+    return resolved;
+}
+
+void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_list) {
+    if (info_list.empty()) return;
+    std::cout << MAGENTA << "📥 Downloading " << info_list.size() << " unique wheels in parallel (concurrency: 4)..." << RESET << std::endl;
+    
+    std::queue<PackageInfo> q;
+    for (const auto& info : info_list) {
+        fs::path target = cfg.spip_root / (info.name + "-" + info.version + ".whl");
+        if (!fs::exists(target)) q.push(info);
+    }
+    
+    if (q.empty()) {
+        std::cout << GREEN << "✨ All wheels already cached." << RESET << std::endl;
+        return;
+    }
+
+    std::mutex m;
+    std::atomic<int> completed{0};
+    int total = q.size();
+    
+    auto worker = [&]() {
+        while (true) {
+            PackageInfo info;
+            {
+                std::lock_guard<std::mutex> lock(m);
+                if (q.empty()) return;
+                info = q.front();
+                q.pop();
+            }
+            
+            fs::path target = cfg.spip_root / (info.name + "-" + info.version + ".whl");
+            std::string cmd = std::format("curl -L -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(target.string()));
+            std::system(cmd.c_str());
+            
+            int c = ++completed;
+            std::cout << "\rProgress: " << c << "/" << total << std::flush;
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; ++i) threads.emplace_back(worker);
+    for (auto& t : threads) t.join();
+    std::cout << std::endl << GREEN << "✔️  Parallel download complete." << RESET << std::endl;
+}
+
 void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto") {
     std::cout << MAGENTA << "🧪 Starting Build Server Mode (Matrix Test) for " << BOLD << pkg << RESET << std::endl;
     
@@ -1090,6 +1158,20 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
     std::cout << BLUE << "📊 Testing all versions..." << RESET << std::endl;
     
+    // Pre-download all needed files for all versions
+    std::cout << MAGENTA << "🔍 Resolving all dependencies for matrix..." << RESET << std::endl;
+    std::map<std::string, PackageInfo> all_needed;
+    for (const auto& ver : versions) {
+        auto resolved = resolve_only({pkg}, ver);
+        for (const auto& [id, info] : resolved) {
+            all_needed[id] = info;
+        }
+    }
+    
+    std::vector<PackageInfo> info_list;
+    for (const auto& [id, info] : all_needed) info_list.push_back(info);
+    parallel_download(cfg, info_list);
+
     fs::path test_script = custom_test_script;
     if (test_script.empty()) {
         std::cout << CYAN << "🤖 Generating minimal test script using Gemini..." << RESET << std::endl;
