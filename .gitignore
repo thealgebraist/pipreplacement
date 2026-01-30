@@ -4,3 +4,6 @@ summary.log
 summary.aux
 summary.out
 summary.pdf
+.DS_Store
+__pycache__/
+*.pyc
