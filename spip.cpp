@@ -1186,28 +1186,50 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         return;
     }
 
-    // Limit to last 5 for efficiency unless specified otherwise (internal heuristic)
-    if (versions.size() > 5) {
-        versions.erase(versions.begin(), versions.begin() + (versions.size() - 5));
+    std::cout << BLUE << "📊 Found " << versions.size() << " versions. ";
+
+    if (test_all_revisions) {
+        std::cout << "Testing all..." << RESET << std::endl;
+        // 'versions' vector is already complete, no slicing needed.
+    } else if (revision_limit > 0) { // --limit N specified
+        if (versions.size() > static_cast<size_t>(revision_limit)) {
+            std::cout << "Limiting to last " << revision_limit << "..." << RESET << std::endl;
+            // Keep the last 'revision_limit' versions.
+            versions.erase(versions.begin(), versions.begin() + (versions.size() - revision_limit));
+        } else {
+            std::cout << "Testing all available (" << versions.size() << ") within limit." << RESET << std::endl;
+            // All available versions are within the limit, so test all. No slicing needed.
+        }
+    } else { // Default case: no --all, no --limit specified.
+        // Apply the heuristic of last 5 if total versions > 5.
+        std::cout << "Testing all available (" << versions.size() << ")." << RESET << std::endl;
+        if (versions.size() > 5) { 
+            versions.erase(versions.begin(), versions.begin() + (versions.size() - 5));
+        }
     }
     
     // Initial analysis for the latest version to show config
-    PackageInfo latest_info = get_package_info(pkg);
+    PackageInfo latest_info = get_package_info(pkg); // Gets metadata for latest version by default
     std::cout << CYAN << "📋 Configuration Info:" << RESET << std::endl;
     std::cout << "  - Package:         " << BOLD << pkg << RESET << std::endl;
     std::cout << "  - Latest Version:  " << latest_info.version << std::endl;
-    std::cout << "  - Python Req:      " << (latest_info.requires_python.empty() ? "None" : latest_info.requires_python) << std::endl;
-    std::cout << "  - Matrix Size:     " << versions.size() << " versions" << std::endl;
+    std::cout << "  - Python Req:      " << (latest_<string>requires_python.empty() ? "None" : latest_info.requires_python) << std::endl;
+    std::cout << "  - Matrix Size:     " << versions.size() << " versions to test" << std::endl;
     if (python_version != "auto") {
         std::cout << "  - Python Mode:     Manual Override (" << python_version << ")" << std::endl;
     } else {
         std::cout << "  - Python Mode:     Automatic (from metadata)" << std::endl;
     }
 
-    std::cout << BLUE << "📊 Testing all versions..." << RESET << std::endl;
+    // Proceed to download and test if there are versions to process
+    if (versions.empty()) {
+        std::cout << YELLOW << "ℹ️ No versions selected for testing after applying filters." << RESET << std::endl;
+        return;
+    }
     
-    // Pre-download all needed files for all versions
-    std::cout << MAGENTA << "🔍 Resolving all dependencies for matrix..." << RESET << std::endl;
+    // Pre-download all needed files for all selected versions
+
+
     ResourceProfiler* res_prof = profile ? new ResourceProfiler() : nullptr;
     std::map<std::string, PackageInfo> all_needed;
     for (const auto& ver : versions) {
@@ -1307,15 +1329,37 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         Config m_cfg = cfg;
         m_cfg.project_env_path = matrix_path;
         
-        // 1. Install
+        // 1. Install main package and its dependencies
         try {
-            resolve_and_install(m_cfg, {pkg}, ver);
+            resolve_and_install(m_cfg, {pkg}, ver); // Installs pkg and its runtime deps
             res.install = true;
         } catch (...) {
             std::cout << RED << "❌ Installation failed for " << ver << RESET << std::endl;
         }
 
         if (res.install) {
+            // Check for development requirements for running tests
+            fs::path dev_req_file = matrix_path / "requirements-dev.txt";
+            if (fs::exists(dev_req_file)) {
+                std::cout << CYAN << "📝 Installing development requirements from requirements-dev.txt..." << RESET << std::endl;
+                std::vector<std::string> dev_targets;
+                std::ifstream req_ifs(dev_req_file);
+                std::string line;
+                while (std::getline(req_ifs, line)) {
+                    // Ignore empty lines and comments
+                    line.erase(0, line.find_first_not_of(" \t\n\r"));
+                    line.erase(line.find_last_not_of(" \t\n\r") + 1);
+                    if (!line.empty() && !line.starts_with('#')) {
+                        dev_targets.push_back(line);
+                    }
+                }
+                if (!dev_targets.empty()) {
+                    // Install dev dependencies into the same environment
+                    // resolve_and_install will download necessary wheels if not cached
+                    resolve_and_install(m_cfg, dev_targets);
+                }
+            }
+            
             // 2. Run package tests
             std::cout << CYAN << "🧪 Running package tests..." << RESET << std::endl;
             fs::path python_bin = matrix_path / "bin" / "python";
@@ -1433,8 +1477,8 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
 struct TopPkg { std::string name; long downloads; };
 
-void show_top_packages(bool refs) {
-    if (refs) {
+void show_top_packages(bool show_references, bool show_dependencies) {
+    if (show_references) {
         std::cout << MAGENTA << "🏆 Fetching Top 10 PyPI Packages by Dependent Repos (Libraries.io)..." << RESET << std::endl;
         // Libraries.io HTML parsing via regex
         std::string cmd = "curl -s -H \"User-Agent: Mozilla/5.0\" \"https://libraries.io/search?languages=Python&order=desc&platforms=Pypi&sort=dependents_count\"";
@@ -1445,13 +1489,59 @@ void show_top_packages(bool refs) {
 
         std::regex re(R"(<h5>\s*<a href=\"/pypi/[^\"]+\">([^<]+)</a>)");
         std::sregex_iterator next(html.begin(), html.end(), re);
-        std::sregex_iterator end;
-        int rank = 1;
-        while (next != end && rank <= 10) {
-            std::smatch match = *next;
-            std::cout << std::format("{:<5} {:<30}", rank++, match[1].str()) << std::endl;
-            next++;
+        std::sregex_
+    } else if (show_dependencies) {
+        std::cout << MAGENTA << "🏆 Fetching Top 10 PyPI Packages by Dependency Count..." << RESET << std::endl;
+        
+        // Fetch top packages by download count as a base list
+        std::string cmd_download = "curl -s \"https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.json\"";
+        std::string json_download = get_exec_output(cmd_download);
+        
+        std::vector<std::pair<std::string, long>> top_downloaded;
+        size_t pos = 0;
+        int count = 0;
+        while (count < 100 && pos < json_download.length()) { // Fetch top 100 for analysis
+            size_t proj_key = json_download.find("\"project\":", pos);
+            if (proj_key == std::string::npos) break;
+            size_t start_q = json_download.find("\"", proj_key + 10);
+            size_t end_q = json_download.find("\"", start_q + 1);
+            std::string name = json_download.substr(start_q + 1, end_q - start_q - 1);
+            
+            size_t dl_key = json_download.find("\"download_count\":", end_q);
+            size_t end_val = json_download.find_first_of(",}", dl_key);
+            std::string dl_str = json_download.substr(dl_key + 17, end_val - (dl_key + 17));
+            long dl = std::stol(dl_str);
+            
+            top_downloaded.push_back({name, dl});
+            pos = end_val;
+            count++;
         }
+
+        std::vector<std::pair<std::string, int>> dep_counts;
+        std::cout << "Analyzing dependencies for top packages..." << std::endl;
+        int analyzed = 0;
+        for (const auto& pair : top_downloaded) {
+            if (analyzed >= 50) break; // Limit analysis to top 50 downloaded for performance
+            
+            PackageInfo info = get_package_info(pair.first); // Fetch metadata to count dependencies
+            if (!info.name.empty()) {
+                dep_counts.push_back({info.name, info.dependencies.size()});
+                analyzed++;
+                if (analyzed % 10 == 0) std::cout << "\rAnalyzed " << analyzed << "/50..." << std::flush;
+            }
+        }
+        std::cout << std::endl;
+
+        std::sort(dep_counts.begin(), dep_counts.end(), [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+
+        std::cout << BOLD << std::format("{:<5} {:<30} {:<15}", "Rank", "Package", "Dependencies") << RESET << std::endl;
+        std::cout << "----------------------------------------------------" << std::endl;
+        for (int i = 0; i < std::min((int)dep_counts.size(), 10); ++i) {
+            std::cout << std::format("{:<5} {:<30} {:<15}", i + 1, dep_counts[i].first, dep_counts[i].second) << std::endl;
+        }
+
     } else {
         std::cout << MAGENTA << "🏆 Fetching Top 10 PyPI Packages by Downloads (30 days)..." << RESET << std::endl;
         std::string cmd = "curl -s \"https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.json\"";
@@ -1790,11 +1880,29 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         std::system(git_cmd.c_str());
     }
     else if (command == "top") {
-        if (args.size() > 1 && args[1] == "--references") {
-            show_top_packages(true);
-        } else {
-            show_top_packages(false);
+        std::string sort_order = "downloads"; // Default
+        bool show_references = false; // Corresponds to --references
+        bool show_dependencies = false; // Corresponds to --dependencies
+
+        if (args.size() > 1) {
+            for (size_t i = 1; i < args.size(); ++i) {
+                if (args[i] == "--references") {
+                    if (show_dependencies) { 
+                        std::cerr << "Error: Cannot use --references with --dependencies." << std::endl;
+                        return; 
+                    }
+                    show_references = true;
+                } else if (args[i] == "--dependencies") {
+                    if (show_references) { 
+                        std::cerr << "Error: Cannot use --dependencies with --references." << std::endl;
+                        return; 
+                    }
+                    show_dependencies = true;
+                }
+                // Add more flags here if needed
+            }
         }
+        show_top_packages(show_references, show_dependencies);
     }
     else if (command == "install" || command == "i") {
         setup_project_env(cfg);
@@ -1976,24 +2084,59 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         freeze_environment(cfg, args[1]);
     }
     else if (command == "matrix") {
-        if (!require_args(args, 2, "Usage: spip matrix <package> [--python version] [--profile] [test_script.py]")) return;
-        std::string pkg = args[1];
+        // Usage: spip matrix <package> [--python version] [--profile] [--no-cleanup] [--limit N | --all] [test_script.py]
+        if (args.size() < 3) { // Need at least 'spip', 'matrix', '<package>'
+            std::cerr << "Usage: spip matrix <package> [--python version] [--profile] [--no-cleanup] [--limit N | --all] [test_script.py]" << std::endl;
+            return;
+        }
+
+        std::string pkg = args[2]; // Package name is the third argument (index 2)
         std::string test_script = "";
         std::string python_ver = "auto";
         bool profile = false;
         bool no_cleanup = false;
-        for (size_t i = 2; i < args.size(); ++i) {
+        int revision_limit = -1;
+        bool test_all_revisions = false;
+
+        // Iterate through arguments starting from index 3 to parse options and script path
+        for (size_t i = 3; i < args.size(); ++i) {
             if (args[i] == "--python" && i + 1 < args.size()) {
                 python_ver = args[++i];
             } else if (args[i] == "--profile") {
                 profile = true;
             } else if (args[i] == "--no-cleanup") {
                 no_cleanup = true;
-            } else if (test_script.empty()) {
-                test_script = args[i];
+            } else if (args[i] == "--limit" && i + 1 < args.size()) {
+                try {
+                    if (test_all_revisions) { // Ensure --limit is not used with --all
+                        std::cerr << "Error: Cannot use --limit with --all." << std::endl;
+                        return;
+                    }
+                    revision_limit = std::stoi(args[++i]);
+                } catch (const std::invalid_argument& ia) {
+                    std::cerr << "Invalid argument for --limit: " << args[i] << std::endl;
+                    return;
+                } catch (const std::out_of_range& oor) {
+                    std::cerr << "Argument out of range for --limit: " << args[i] << std::endl;
+                    return;
+                }
+            } else if (args[i] == "--all") {
+                // Ensure --all is not used with --limit
+                if (revision_limit != -1) { // Check against --limit
+                    std::cerr << "Error: Cannot use --all with --limit." << std::endl;
+                    return;
+                }
+                test_all_revisions = true;
+            } else {
+                // Assume it's the test script if not an option and test_script is not already set
+                if (test_script.empty()) {
+                    test_script = args[i];
+                } else {
+                    std::cerr << "Warning: Multiple positional arguments found; using the first one (" << test_script << ") as test script." << std::endl;
+                }
             }
         }
-        matrix_test(cfg, pkg, test_script, python_ver, profile, no_cleanup);
+        matrix_test(cfg, pkg, test_script, python_ver, profile, no_cleanup, revision_limit, test_all_revisions);
     }
     else if (command == "list") {
         ensure_dirs(cfg);
