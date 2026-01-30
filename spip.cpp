@@ -1284,7 +1284,9 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     std::cout << std::format("{:<15} {:<10} {:<15} {:<15}", "Version", "Install", "Pkg Tests", "Custom Test") << std::endl;
     std::cout << "------------------------------------------------------------" << std::endl;
     for (const auto& r : results) {
-        std::cout << std::format("{:<15} {:<10} {:<15} {:<15}", 
+        // ANSI codes (e.g. GREEN, RESET) take up characters but don't occupy space in terminal.
+        // We add 9 to the width to compensate for the invisible ANSI codes.
+        std::cout << std::format("{:<15} {:<19} {:<24} {:<24}", 
             r.version, 
             (r.install ? GREEN + "PASS" : RED + "FAIL") + RESET,
             (r.pkg_tests ? GREEN + "PASS" : YELLOW + "FAIL/SKIP") + RESET,
