@@ -1,0 +1,70 @@
+/*
+ * LR(1) Grammar for spip matrix command options
+ *
+ * This grammar defines the valid structure for the 'spip matrix' command arguments.
+ * It handles mixed ordering of options and positional arguments (package name, script).
+ *
+ * Terminals (Tokens):
+ *  SPIP        "spip"
+ *  MATRIX      "matrix"
+ *  PKG         <string> (Package name, identified by position or context)
+ *  SCRIPT      <string> (Test script path, identified by position or context)
+ *  PYTHON_FLAG "--python"
+ *  VER         <string> (Python version string)
+ *  PROFILE     "--profile"
+ *  NO_CLEANUP  "--no-cleanup"
+ *  LIMIT_FLAG  "--limit"
+ *  NUM         <integer>
+ *  ALL         "--all"
+ */
+
+/*
+ * Grammar Rules
+ * Start Symbol: Command
+ */
+
+1.  Command   -> SPIP MATRIX Args
+
+2.  Args      -> Arg Args
+3.  Args      -> ε
+
+/*
+ * Arg can be an Option or a Positional argument
+ * The semantic parser would enforce max 1 PKG and max 1 SCRIPT.
+ * In a pure CFG/LR(1), we can allow them to appear mixed.
+ */
+
+4.  Arg       -> Option
+5.  Arg       -> Positional
+
+/*
+ * Options
+ */
+
+6.  Option    -> PYTHON_FLAG VER
+7.  Option    -> PROFILE
+8.  Option    -> NO_CLEANUP
+9.  Option    -> LIMIT_FLAG NUM
+10. Option    -> ALL
+
+/*
+ * Positional Arguments (abstracted)
+ * In a real parser, we'd assign the first Positional to PKG and second to SCRIPT.
+ */
+
+11. Positional -> PKG_OR_SCRIPT_TOKEN
+
+/*
+ * Usage example derivation:
+ * spip matrix --limit 32 setuptools
+ *
+ * Command
+ *  -> SPIP MATRIX Args
+ *  -> SPIP MATRIX Arg Args
+ *  -> SPIP MATRIX Option Args
+ *  -> SPIP MATRIX LIMIT_FLAG NUM Args
+ *  -> SPIP MATRIX LIMIT_FLAG NUM Arg Args
+ *  -> SPIP MATRIX LIMIT_FLAG NUM Positional Args
+ *  -> SPIP MATRIX LIMIT_FLAG NUM PKG_OR_SCRIPT_TOKEN Args
+ *  -> SPIP MATRIX LIMIT_FLAG NUM PKG_OR_SCRIPT_TOKEN ε
+ */

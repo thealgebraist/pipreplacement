@@ -17,6 +17,13 @@
 #include <map>
 #include <chrono>
 #include <sys/resource.h>
+#include <csignal>
+
+volatile std::atomic<bool> g_interrupted{false};
+
+void signal_handler(int) {
+    g_interrupted = true;
+}
 
 namespace fs = std::filesystem;
 
@@ -393,38 +400,53 @@ std::vector<std::string> extract_array(const std::string& json, const std::strin
 
 std::vector<std::string> get_all_versions(const std::string& pkg) {
     fs::path db_file = get_db_path(pkg);
-    if (!fs::exists(db_file)) return {};
-    
-    std::ifstream ifs(db_file);
-    std::string content((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
+    if (!fs::exists(db_file)) {
+        Config cfg = init_config(); 
+        fetch_package_metadata(cfg, pkg);
+    }
     
     std::vector<std::string> versions;
-    size_t rel_pos = content.find("\"releases\"");
-    if (rel_pos != std::string::npos) {
-        size_t start_brace = content.find("{", rel_pos);
-        if (start_brace != std::string::npos) {
-            // Very simple parser to find keys in the releases object
-            int balance = 1;
-            size_t cur = start_brace + 1;
-            while (cur < content.size() && balance > 0) {
-                if (content[cur] == '{') balance++;
-                else if (content[cur] == '}') balance--;
-                else if (content[cur] == '\"' && balance == 1) {
-                    size_t end_q = content.find('\"', cur + 1);
-                    if (end_q != std::string::npos) {
-                        std::string ver = content.substr(cur + 1, end_q - cur - 1);
-                        // Check if it's followed by a colon (meaning it's a key)
-                        size_t colon = content.find_first_not_of(" \t\n\r", end_q + 1);
-                        if (colon != std::string::npos && content[colon] == ':') {
-                            versions.push_back(ver);
-                        }
-                        cur = end_q;
-                    }
-                }
-                cur++;
-            }
+    
+    // Improved Regex approach for finding versions keys
+    if (fs::exists(db_file)) {
+        std::ifstream ifs(db_file);
+        std::string json((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>()); 
+        
+        // Find "releases": {
+        size_t rel_pos = json.find("\"releases\"");
+        if (rel_pos == std::string::npos) return {};
+        
+        std::regex ver_re(R"(\"([0-9]+\.[0-9]+(\.[0-9]+)?([a-zA-Z0-9]+)?)\"\s*:)");
+        
+        auto begin = std::sregex_iterator(json.begin() + rel_pos, json.end(), ver_re);
+        auto end = std::sregex_iterator();
+        
+        for (std::sregex_iterator i = begin; i != end; ++i) {
+            std::smatch match = *i;
+            versions.push_back(match[1].str());
         }
     }
+    
+    // Semantic sort
+    std::sort(versions.begin(), versions.end(), [](const std::string& a, const std::string& b) {
+        // Very basic semantic version comparison
+        // Split by .
+        // ...
+        // For now string compare is okayish if same length, but bad for "1.10" vs "1.2".
+        // Let's implement a tiny helper lambda
+        auto split = [](const std::string& s) {
+            std::vector<int> parts;
+            std::string part;
+            for (char c : s) {
+                if (isdigit(c)) part += c;
+                else { if(!part.empty()) parts.push_back(std::stoi(part)); part=""; }
+            }
+            if (!part.empty()) parts.push_back(std::stoi(part));
+            return parts;
+        };
+        return split(a) < split(b);
+    });
+
     return versions;
 }
 
@@ -597,7 +619,26 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         std::string extract_cmd = std::format("{} {} {} {}", 
             quote_arg(python_bin.string()), quote_arg(extraction_helper.string()), 
             quote_arg(temp_wheel.string()), quote_arg(site_packages.string()));
-        std::system(extract_cmd.c_str());
+        int ret = std::system(extract_cmd.c_str());
+        
+        if (ret != 0) {
+            std::cerr << YELLOW << "⚠️ Extraction failed. Wheel might be corrupt. Deleting and retrying..." << RESET << std::endl;
+            fs::remove(temp_wheel);
+            
+            // Retry download once
+             std::string dl_cmd = std::format("curl -L -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(temp_wheel.string()));
+             int dl_ret = std::system(dl_cmd.c_str());
+             
+             if (dl_ret == 0 && fs::exists(temp_wheel)) {
+                 ret = std::system(extract_cmd.c_str());
+             }
+             
+             if (ret != 0) {
+                 std::cerr << RED << "❌ Installation failed for " << name << ". (Bad wheel or extraction error)" << RESET << std::endl;
+                 // Clean up bad wheel to prevent future loops, unless debugging
+                 if (fs::exists(temp_wheel)) fs::remove(temp_wheel); 
+             }
+        }
     }
 }
 
@@ -1152,7 +1193,7 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
     int total = q.size();
     
     auto worker = [&]() {
-        while (true) {
+        while (!g_interrupted) {
             PackageInfo info;
             {
                 std::lock_guard<std::mutex> lock(m);
@@ -1163,7 +1204,14 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
             
             fs::path target = cfg.spip_root / (info.name + "-" + info.version + ".whl");
             std::string cmd = std::format("curl -L -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(target.string()));
-            std::system(cmd.c_str());
+            int ret = std::system(cmd.c_str());
+            
+            if (g_interrupted || ret != 0) {
+                 if (fs::exists(target)) {
+                     fs::remove(target); // Cleanup partial file
+                 }
+                 if (g_interrupted) return;
+            }
             
             int c = ++completed;
             std::cout << "\rProgress: " << c << "/" << total << std::flush;
@@ -1173,6 +1221,12 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
     std::vector<std::thread> threads;
     for (int i = 0; i < 4; ++i) threads.emplace_back(worker);
     for (auto& t : threads) t.join();
+    
+    if (g_interrupted) {
+        std::cout << std::endl << RED << "❌ Operation interrupted by user. Exiting." << RESET << std::endl;
+        std::exit(1);
+    }
+    
     std::cout << std::endl << GREEN << "✔️  Parallel download complete." << RESET << std::endl;
 }
 
@@ -1213,7 +1267,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     std::cout << CYAN << "📋 Configuration Info:" << RESET << std::endl;
     std::cout << "  - Package:         " << BOLD << pkg << RESET << std::endl;
     std::cout << "  - Latest Version:  " << latest_info.version << std::endl;
-    std::cout << "  - Python Req:      " << (latest_<string>requires_python.empty() ? "None" : latest_info.requires_python) << std::endl;
+    std::cout << "  - Python Req:      " << (latest_info.requires_python.empty() ? "None" : latest_info.requires_python) << std::endl;
     std::cout << "  - Matrix Size:     " << versions.size() << " versions to test" << std::endl;
     if (python_version != "auto") {
         std::cout << "  - Python Mode:     Manual Override (" << python_version << ")" << std::endl;
@@ -1226,8 +1280,6 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         std::cout << YELLOW << "ℹ️ No versions selected for testing after applying filters." << RESET << std::endl;
         return;
     }
-    
-    // Pre-download all needed files for all selected versions
 
 
     ResourceProfiler* res_prof = profile ? new ResourceProfiler() : nullptr;
@@ -1287,7 +1339,11 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     struct ErrorLog { std::string version; std::string python; std::string output; };
     std::vector<ErrorLog> error_logs;
 
+    int ver_idx = 0;
+    int total_vers = versions.size();
+
     for (const auto& ver : versions) {
+        ver_idx++;
         std::cout << "\n" << BOLD << BLUE << "════════════════════════════════════════════════════════════" << RESET << std::endl;
         
         Result res { ver, false, false, false, {0,0,0,0} };
@@ -1298,7 +1354,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             target_py = parse_python_requirement(v_info.requires_python);
         }
 
-        std::cout << BOLD << "🚀 Testing Version: " << GREEN << ver << RESET 
+        std::cout << BOLD << "🚀 Testing Version (" << ver_idx << "/" << total_vers << "): " << GREEN << ver << RESET 
                   << " (Python " << YELLOW << target_py << RESET << ")" << std::endl;
 
         ResourceProfiler* v_prof = profile ? new ResourceProfiler(cfg.envs_root) : nullptr;
@@ -1374,8 +1430,64 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             std::string p_name = pkg; std::transform(p_name.begin(), p_name.end(), p_name.begin(), ::tolower);
             fs::path p_path = sp / p_name;
             if (fs::exists(p_path)) {
-                int r = std::system(std::format("{} -m pytest {} --maxfail=1 -q", quote_arg(python_bin.string()), quote_arg(p_path.string())).c_str());
-                res.pkg_tests = (r == 0);
+                // Run pytest and capture output to detect missing dependencies
+                std::string pytest_cmd = std::format("{} -m pytest {} --maxfail=1 -q", quote_arg(python_bin.string()), quote_arg(p_path.string()));
+                std::string test_out = get_exec_output(pytest_cmd);
+                
+                // Check if failed due to missing dependency
+                bool missing_dep = false;
+                std::string missing_pkg = "";
+                
+                // Regex for "ImportError: <pkg> is a required dependency"
+                std::regex import_err_re(R"(ImportError: ([a-zA-Z0-9_\-]+) is a required dependency)");
+                std::regex mod_err_re(R"(ModuleNotFoundError: No module named '?([a-zA-Z0-9_\-]+)'?)");
+                std::smatch m;
+                
+                if (std::regex_search(test_out, m, import_err_re)) {
+                    missing_pkg = m[1].str();
+                    missing_dep = true;
+                } else if (std::regex_search(test_out, m, mod_err_re)) {
+                     missing_pkg = m[1].str();
+                     // Filter out internal modules (often contain dots)
+                     if (missing_pkg.find('.') == std::string::npos && missing_pkg != p_name) {
+                         missing_dep = true;
+                     }
+                }
+                
+                if (missing_dep && !missing_pkg.empty()) {
+                    std::cout << YELLOW << "⚠️ Missing test dependency detected: " << missing_pkg << ". Installing..." << RESET << std::endl;
+                    try {
+                        resolve_and_install(m_cfg, {missing_pkg});
+                        // Retry test
+                        std::cout << CYAN << "🔄 Retrying package tests..." << RESET << std::endl;
+                        test_out = get_exec_output(pytest_cmd);
+                    } catch (...) {
+                         std::cout << RED << "❌ Failed to install missing test dependency: " << missing_pkg << RESET << std::endl;
+                    }
+                }
+                
+                // Determine success based on exit code or output content (since get_exec_output hides exit code)
+                // get_exec_output returns stdout+stderr. pytest usually prints "ignored" or "failed" or "passed".
+                // However, without exit code, it's hard. 
+                // Let's use std::system for the *final* check/result to respect exit codes, 
+                // but use test_out for the first check.
+                // Or better: check if test_out contains "failed" or "error" if we can't reliably get exit code from popen efficiently.
+                // Actually, the simplest is to just run std::system again if we retried.
+                
+                if (missing_dep) {
+                     int r = std::system(pytest_cmd.c_str());
+                     res.pkg_tests = (r == 0);
+                } else {
+                     // Check if the FIRST run contained failures. 
+                     // Since get_exec_output swallows exit code, we have to rely on string parsing OR re-run.
+                     // The previous code used std::system. 
+                     // Let's execute std::system one more time if not missing_dep, to be consistent with exit codes.
+                     // It's a bit duplicate but safe.
+                     // A better way: check if test_out has content typical of success? No, too fragile.
+                     int r = std::system(pytest_cmd.c_str());
+                     res.pkg_tests = (r == 0);
+                }
+                
             } else {
                 std::cout << YELLOW << "⚠️ Could not find package dir for tests. Skipping pkg tests." << RESET << std::endl;
             }
@@ -1480,16 +1592,32 @@ struct TopPkg { std::string name; long downloads; };
 void show_top_packages(bool show_references, bool show_dependencies) {
     if (show_references) {
         std::cout << MAGENTA << "🏆 Fetching Top 10 PyPI Packages by Dependent Repos (Libraries.io)..." << RESET << std::endl;
-        // Libraries.io HTML parsing via regex
-        std::string cmd = "curl -s -H \"User-Agent: Mozilla/5.0\" \"https://libraries.io/search?languages=Python&order=desc&platforms=Pypi&sort=dependents_count\"";
+        // Libraries.io HTML parsing via regex (Follow redirects with -L)
+        std::string cmd = "curl -L -s -H \"User-Agent: Mozilla/5.0\" \"https://libraries.io/search?languages=Python&order=desc&platforms=Pypi&sort=dependents_count\"";
         std::string html = get_exec_output(cmd);
         
-        std::cout << BOLD << std::format("{:<5} {:<30}", "Rank", "Package") << RESET << std::endl;
-        std::cout << "-----------------------------------" << std::endl;
+        bool success = false;
+        if (!html.empty() && html.find("Login to Libraries.io") == std::string::npos) {
+            std::cout << BOLD << std::format("{:<5} {:<30}", "Rank", "Package") << RESET << std::endl;
+            std::cout << "-----------------------------------" << std::endl;
 
-        std::regex re(R"(<h5>\s*<a href=\"/pypi/[^\"]+\">([^<]+)</a>)");
-        std::sregex_iterator next(html.begin(), html.end(), re);
-        std::sregex_
+            std::regex re(R"(<h5>\s*<a href=\"/pypi/[^\"]+\">([^<]+)</a>)");
+            std::sregex_iterator next(html.begin(), html.end(), re);
+            std::sregex_iterator end;
+            int rank = 1;
+            while (next != end && rank <= 10) {
+                 std::smatch match = *next;
+                 std::cout << std::format("{:<5} {:<30}", rank++, match[1].str()) << std::endl;
+                 ++next;
+            }
+            if (rank > 1) success = true;
+        }
+        
+        if (!success) {
+            std::cout << YELLOW << "⚠️  Unable to scrape Libraries.io (Login required or structure changed)." << RESET << std::endl;
+            std::cout << YELLOW << "   Falling back to Top PyPI Download Statistics..." << RESET << std::endl;
+            show_top_packages(false, false);
+        }
     } else if (show_dependencies) {
         std::cout << MAGENTA << "🏆 Fetching Top 10 PyPI Packages by Dependency Count..." << RESET << std::endl;
         
@@ -2084,13 +2212,12 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         freeze_environment(cfg, args[1]);
     }
     else if (command == "matrix") {
-        // Usage: spip matrix <package> [--python version] [--profile] [--no-cleanup] [--limit N | --all] [test_script.py]
-        if (args.size() < 3) { // Need at least 'spip', 'matrix', '<package>'
-            std::cerr << "Usage: spip matrix <package> [--python version] [--profile] [--no-cleanup] [--limit N | --all] [test_script.py]" << std::endl;
-            return;
+        if (args.size() < 2) {
+             std::cerr << "Usage: spip matrix <package> [options]" << std::endl;
+             return;
         }
 
-        std::string pkg = args[2]; // Package name is the third argument (index 2)
+        std::string pkg = "";
         std::string test_script = "";
         std::string python_ver = "auto";
         bool profile = false;
@@ -2098,44 +2225,32 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         int revision_limit = -1;
         bool test_all_revisions = false;
 
-        // Iterate through arguments starting from index 3 to parse options and script path
-        for (size_t i = 3; i < args.size(); ++i) {
-            if (args[i] == "--python" && i + 1 < args.size()) {
+        // Skip 'matrix' (0)
+        for (size_t i = 1; i < args.size(); ++i) {
+            std::string arg = args[i];
+            if (arg == "--python" && i + 1 < args.size()) {
                 python_ver = args[++i];
-            } else if (args[i] == "--profile") {
+            } else if (arg == "--profile") {
                 profile = true;
-            } else if (args[i] == "--no-cleanup") {
+            } else if (arg == "--no-cleanup") {
                 no_cleanup = true;
-            } else if (args[i] == "--limit" && i + 1 < args.size()) {
-                try {
-                    if (test_all_revisions) { // Ensure --limit is not used with --all
-                        std::cerr << "Error: Cannot use --limit with --all." << std::endl;
-                        return;
-                    }
-                    revision_limit = std::stoi(args[++i]);
-                } catch (const std::invalid_argument& ia) {
-                    std::cerr << "Invalid argument for --limit: " << args[i] << std::endl;
-                    return;
-                } catch (const std::out_of_range& oor) {
-                    std::cerr << "Argument out of range for --limit: " << args[i] << std::endl;
-                    return;
-                }
-            } else if (args[i] == "--all") {
-                // Ensure --all is not used with --limit
-                if (revision_limit != -1) { // Check against --limit
-                    std::cerr << "Error: Cannot use --all with --limit." << std::endl;
-                    return;
-                }
+            } else if (arg == "--limit" && i + 1 < args.size()) {
+                revision_limit = std::stoi(args[++i]);
+            } else if (arg == "--all") {
                 test_all_revisions = true;
+            } else if (arg.starts_with("--")) {
+                std::cerr << "Unknown option: " << arg << std::endl;
             } else {
-                // Assume it's the test script if not an option and test_script is not already set
-                if (test_script.empty()) {
-                    test_script = args[i];
-                } else {
-                    std::cerr << "Warning: Multiple positional arguments found; using the first one (" << test_script << ") as test script." << std::endl;
-                }
+                if (pkg.empty()) pkg = arg;
+                else if (test_script.empty()) test_script = arg;
             }
         }
+
+        if (pkg.empty()) {
+            std::cerr << "Error: Package name required." << std::endl;
+            return;
+        }
+        
         matrix_test(cfg, pkg, test_script, python_ver, profile, no_cleanup, revision_limit, test_all_revisions);
     }
     else if (command == "list") {
@@ -2152,6 +2267,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
 }
 
 int main(int argc, char* argv[]) {
+    std::signal(SIGINT, signal_handler);
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) args.push_back(argv[i]);
     Config cfg = init_config();

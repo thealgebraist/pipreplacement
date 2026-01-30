@@ -358,13 +358,12 @@ def run_benchmark():
     files = ["spip.cpp"]
     funcs = {}
     for f in files:
-        funcs.update(parse_cpp(f))
+        if os.path.exists(f):
+            funcs.update(parse_cpp(f))
+        else:
+            print(f"Warning: {f} not found.")
 
     # Define Query: Site packages search pattern
-    # "check dir -> check name -> set path -> break"
-    # This corresponds to a chain of 4-5 nodes.
-    # To ensure we find simple things, let's just create a small chain graph
-    # 0->1->2->3
     q_nodes = 4
     q_adj = np.zeros((q_nodes, q_nodes), dtype=int)
     q_adj[0, 1] = 1
@@ -373,8 +372,8 @@ def run_benchmark():
 
     solvers = [
         ("Gradient Descent", solver_gradient_descent),
-        ("LP Relaxation", solver_lp),  # Expect Failure/Not Implemented
-        ("MILP (Simulated)", solver_milp),  # Expect Failure/Not Implemented
+        ("LP Relaxation", solver_lp),
+        ("MILP (Simulated)", solver_milp),
         ("Branch & Bound", solver_bnb),
         ("Constraint Prog", solver_cp),
         ("Simulated Annealing", solver_sa),
@@ -383,46 +382,81 @@ def run_benchmark():
     ]
 
     results = {}
-
-    print("Running Benchmark on spip.cpp functions (Target: Chain-4 Subgraph)...")
-
-    # Pick a few candidate functions to test against to save total time
-    test_funcs = ["resolve_and_install", "prune_orphans", "verify_environment"]
-    # Add a dummy one that likely DOESN'T match
-    test_funcs.append("compute_hash")
-
-    for f_name in test_funcs:
+    
+    # 1. Identify tasks first
+    test_funcs_names = ["resolve_and_install", "prune_orphans", "verify_environment", "compute_hash"]
+    tasks = []
+    
+    print("Preparing Benchmark Tasks...")
+    for f_name in test_funcs_names:
         if f_name not in funcs:
             continue
-        print(f"\nAnalyzing: {f_name}")
         nodes, t_adj = build_graph(funcs[f_name])
         if len(nodes) < q_nodes:
-            print("  Skipping (too small)")
             continue
+        
+        for s_name, s_func in solvers:
+            tasks.append({
+                "func": f_name,
+                "solver_name": s_name,
+                "solver_func": s_func,
+                "q_adj": q_adj,
+                "t_adj": t_adj
+            })
 
-        for name, solver in solvers:
+    total = len(tasks)
+    print(f"Scheduled {total} benchmark tasks.")
+    print("Running Benchmark on spip.cpp functions (Target: Chain-4 Subgraph)...")
+    
+    # Group tasks by function for cleaner output headers
+    current_func_header = ""
+
+    for i, task in enumerate(tasks):
+        f_name = task["func"]
+        s_name = task["solver_name"]
+        solver = task["solver_func"]
+        
+        if f_name != current_func_header:
+            if current_func_header != "": print("") # spacer
+            print(f"Analyzing: {f_name}")
+            current_func_header = f_name
+
+        # Progress Indicator
+        progress_msg = f"  [{i+1}/{total}] {s_name:20s}: Running..."
+        sys.stdout.write(progress_msg)
+        sys.stdout.flush()
+
+        try:
+            t0 = time.time()
             try:
-                # 60s timeout enforced inside solver or via explicit wrapper
-                t0 = time.time()
-                try:
-                    # Enforce signal alarm for strict cut-off
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(60)
-                    found = solver(q_adj, t_adj, time_limit=59)
-                    signal.alarm(0)
-                except TimeoutException:
-                    found = "Timeout"
-
-                dur = time.time() - t0
-                print(f"  {name:20s}: {str(found):10s} ({dur:.4f}s)")
-
-                if f_name not in results:
-                    results[f_name] = []
-                results[f_name].append((name, found, dur))
-
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(60)
+                found = solver(task["q_adj"], task["t_adj"], time_limit=59)
+                signal.alarm(0)
+            except TimeoutException:
+                found = "Timeout"
             except Exception as e:
-                print(f"  {name:20s}: ERROR {e}")
+                found = f"Err: {e}"
+                signal.alarm(0)
 
+            dur = time.time() - t0
+            
+            # Result Output (Overwrite line)
+            sys.stdout.write('\r')
+            # Clear line just in case
+            sys.stdout.write(' ' * (len(progress_msg) + 5) + '\r')
+            
+            print(f"  [{i+1}/{total}] {s_name:20s}: {str(found):10s} ({dur:.4f}s)")
+
+            if f_name not in results:
+                results[f_name] = []
+            results[f_name].append((s_name, found, dur))
+
+        except Exception as e:
+            sys.stdout.write('\n')
+            print(f"  {s_name:20s}: CRITICAL ERROR {e}")
+
+    print("\nBenchmark Complete. Generating Report...")
     generate_latex(results)
 
 

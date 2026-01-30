@@ -39,4 +39,5 @@
 - [x] Search for similar functions/subexpressions using a BERT-like model (CodeBERT) and cosine similarity.
 - [x] Tree pattern matching with alpha-equivalence (De Bruijn indices) for CSE detection.
 - [x] Applied refactorings: 3 helper functions extracted (get_site_packages, require_args, exec_with_setup), ~61 lines saved.
-- Adding 'spip top' and 'spip top --references' functionality.
+- [x] Added 'spip top' and 'spip top --references' functionality.
+- [x] Fixed compilation errors in `spip.cpp` (undefined `Cyan` -> `CYAN`, incomplete regex iteration logic).
