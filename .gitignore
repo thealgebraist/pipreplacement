@@ -7,3 +7,10 @@ summary.pdf
 .DS_Store
 __pycache__/
 *.pyc
+temp_parallel_test/*
+spip
+random_64_pkgs.txt
+stress_64_log.txt
+*.log
+*.out
+*.aux

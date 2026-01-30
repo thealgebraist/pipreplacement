@@ -1,0 +1,196 @@
+Creating repo at: "/Users/anders/projects/pipreplacement/temp_parallel_test/.spip/repo"
+hint: Using 'master' as the name for the initial branch. This default branch name
+hint: will change to "main" in Git 3.0. To configure the initial branch name
+hint: to use in all of your new repositories, which will suppress this warning,
+hint: call:
+hint:
+hint: 	git config --global init.defaultBranch <name>
+hint:
+hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+hint: 'development'. The just-created branch can be renamed via this command:
+hint:
+hint: 	git branch -m <name>
+hint:
+hint: Disable this message with "git config set advice.defaultBranchName false"
+Initialized empty Git repository in /Users/anders/projects/pipreplacement/temp_parallel_test/.spip/repo/.git/
+[master (root-commit) 844c15d] Initial commit
+ Committer: Anders Bruun <anders@mac.local>
+Your name and email address were configured automatically based
+on your username and hostname. Please check that they are accurate.
+You can suppress this message by setting them explicitly. Run the
+following command and follow the instructions in your editor to edit
+your configuration file:
+
+    git config --global --edit
+
+After doing this, you may fix the identity used for this commit with:
+
+    git commit --amend --reset-author
+
+[35m🧪 Starting Build Server Mode (Matrix Test) for [1mcolorama[0m
+[34m📊 Found 46 versions. Limiting to last 16...[0m
+[36m📋 Configuration Info:[0m
+  - Package:         [1mcolorama[0m
+  - Latest Version:  0.4.6
+  - Python Req:      !=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7
+  - Matrix Size:     16 versions to test
+  - Python Mode:     Automatic (from metadata)
+[35m📥 Downloading 14 unique wheels in parallel (concurrency: 4)...[0m
+Progress: 1/14Progress: 2/14Progress: 3/14Progress: 4/14Progress: 5/14Progress: 6/14Progress: 7/14Progress: 8/14Progress: 9/14Progress: 10/14Progress: 11/14Progress: 12/14Progress: 13/14Progress: 14/14
+[32m✔️  Parallel download complete.[0m
+[35m⚡ Parallel execution with 8 threads.[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+[1m🚀 Testing Version (5/16): [32m0.3.7[0m (Python [33m3.12[0m)
+[1m🚀 Testing Version (6/16): [32m0.3.8[0m (Python [33m3.12[0m)
+[1m🚀 Testing Version (7/16): [32m0.3.9[0m (Python [33m3.12[0m)
+[1m🚀 Testing Version (3/16): [32m0.3.5[0m (Python [33m3.12[0m)
+[1m🚀 Testing Version (4/16): [32m0.3.6[0m (Python [33m3.12[0m)
+fatal: invalid reference: base/3.12
+[1m🚀 Testing Version (8/16): [32m0.4.0[0m (Python [33m3.12[0m)
+[1m🚀 Testing Version (2/16): [32m0.3.4[0m (Python [33m3.12[0m)
+fatal: invalid reference: base/3.12
+[1m🚀 Testing Version (1/16): [32m0.3.3[0m (Python [33m3.12[0m)
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+[31m❌ Could not find wheel URL for colorama[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+[1m🚀 Testing Version (9/16): [32m0.4.1[0m (Python [33m3.12[0m)
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+[1m🚀 Testing Version (11/16): [32m0.4.3[0m (Python [33m3.12[0m)
+[1m🚀 Testing Version (12/16): [32m0.4.4[0m (Python [33m3.12[0m)
+[31m❌ Could not find wheel URL for colorama[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+[1m🚀 Testing Version (10/16): [32m0.4.2[0m (Python [33m3.12[0m)
+fatal: invalid reference: base/3.12
+[1m🚀 Testing Version (14/16): [32m0.4.5rc1[0m (Python [33m3.12[0m)
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[1m🚀 Testing Version (13/16): [32m0.4.5[0m (Python [33m3.12[0m)
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+
+[1m[34m════════════════════════════════════════════════════════════[0m
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+[1m🚀 Testing Version (15/16): [32m0.4.6[0m (Python [33m3.12[0m)
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+[1m🚀 Testing Version (16/16): [32m0.4.6rc1[0m (Python [33m3.12[0m)
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+fatal: invalid reference: base/3.12
+fatal: invalid reference: base/3.12
+[35m🔍 Resolving dependencies...[0m
+[31m❌ Could not find site-packages directory.[0m
+[31m❌ Installation verification failed: colorama files not found.[0m
+[35m🧹 Pruning worktree metadata...[0m
+
+[1m[35m🏁 Matrix Test Summary for colorama[0m
+Version         Install    Pkg Tests       Custom Test    
+------------------------------------------------------------
+0.3.7           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.4.0           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.3.5           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.3.9           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.3.6           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.3.8           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.3.4           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.3.3           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.4.1           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.4.3           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.4.4           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.4.5rc1        [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.4.5           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.4.2           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.4.6           [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+0.4.6rc1        [31mFAIL[0m       [33mFAIL/SKIP[0m       [31mFAIL[0m           
+Running parallel matrix test for 'colorama' (last 16 versions)...
+Using HOME=/Users/anders/projects/pipreplacement/temp_parallel_test
+SUCCESS: spip matrix finished.
+Total Duration: 2.21s

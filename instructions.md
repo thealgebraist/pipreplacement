@@ -1,6 +1,6 @@
 # Project: Smart Pip (spip) - A Safe Pip Replacement
 
-**Developer**: Antigravity
+**Developer**: Antigravity (The Solver)
 **Task**: Build a pip replacement that avoids global installs, system overwrites, and manual virtualenv management.
 
 ## Components
@@ -42,3 +42,5 @@
 - [x] Added 'spip top' and 'spip top --references' functionality.
 - [x] Fixed compilation errors in `spip.cpp` (undefined `Cyan` -> `CYAN`, incomplete regex iteration logic).
 - [x] Refactored `spip matrix` for high-performance parallel execution (std::thread pool, atomic task tracking, isolated worktrees).
+- [ ] Large-scale 64-package matrix stress test (10 versions each) to achieve ultimate robustness.
+- [ ] Implement 4s-burst resume logic for `spip matrix` to satisfy strict execution constraints.

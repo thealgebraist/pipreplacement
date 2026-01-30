@@ -18,6 +18,7 @@
 #include <chrono>
 #include <sys/resource.h>
 #include <csignal>
+#include <sqlite3.h>
 
 volatile std::atomic<bool> g_interrupted{false};
 
@@ -88,9 +89,84 @@ struct Config {
 		fs::path current_project;
 		std::string project_hash;
 		fs::path project_env_path;
+        fs::path db_file;
 		std::string pypi_mirror = "https://pypi.org"; // Default
 		}
 ;
+
+class ErrorKnowledgeBase {
+    sqlite3* db = nullptr;
+    std::mutex m_db;
+public:
+    ErrorKnowledgeBase(const fs::path& db_path) {
+        if (sqlite3_open(db_path.string().c_str(), &db) != SQLITE_OK) {
+            std::cerr << RED << "❌ Error opening knowledge base: " << sqlite3_errmsg(db) << RESET << std::endl;
+        } else {
+            const char* sql = "CREATE TABLE IF NOT EXISTS exceptions ("
+                              "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                              "package TEXT,"
+                              "python_version TEXT,"
+                              "exception_text TEXT,"
+                              "suggested_fix TEXT,"
+                              "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP);";
+            char* err_msg = nullptr;
+            if (sqlite3_exec(db, sql, nullptr, nullptr, &err_msg) != SQLITE_OK) {
+                std::cerr << RED << "❌ Error creating table: " << err_msg << RESET << std::endl;
+                sqlite3_free(err_msg);
+            }
+        }
+    }
+    ~ErrorKnowledgeBase() { if(db) sqlite3_close(db); }
+
+    void store(const std::string& pkg, const std::string& py_ver, const std::string& exc, const std::string& fix = "") {
+        if (!db) return;
+        std::lock_guard<std::mutex> lock(m_db);
+        const char* sql = "INSERT INTO exceptions (package, python_version, exception_text, suggested_fix) VALUES (?, ?, ?, ?);";
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, pkg.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, py_ver.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, exc.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, fix.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    std::string lookup_fix(const std::string& exc) {
+        if (!db) return "";
+        std::lock_guard<std::mutex> lock(m_db);
+        const char* sql = "SELECT suggested_fix FROM exceptions WHERE (exception_text = ? OR ? LIKE '%' || exception_text || '%') AND suggested_fix != '' ORDER BY (length(exception_text)) DESC LIMIT 1;";
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, exc.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, exc.c_str(), -1, SQLITE_TRANSIENT);
+        std::string fix = "";
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const unsigned char* text = sqlite3_column_text(stmt, 0);
+            if (text) fix = reinterpret_cast<const char*>(text);
+        }
+        sqlite3_finalize(stmt);
+        return fix;
+    }
+
+    std::vector<std::pair<std::string, std::string>> get_fixes_for_pkg(const std::string& pkg) {
+        std::vector<std::pair<std::string, std::string>> fixes;
+        if (!db) return fixes;
+        std::lock_guard<std::mutex> lock(m_db);
+        const char* sql = "SELECT exception_text, suggested_fix FROM exceptions WHERE package = ? AND suggested_fix != '';";
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, pkg.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            fixes.push_back({
+                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)),
+                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1))
+            });
+        }
+        sqlite3_finalize(stmt);
+        return fixes;
+    }
+};
 
 std::string compute_hash(const std::string& s) {
     // Robust, deterministic FNV-1a like mixing for project identifiers
@@ -99,13 +175,16 @@ std::string compute_hash(const std::string& s) {
         h ^= static_cast<uint8_t>(c);
         h *= 0x100000001b3;
     }
-    // Mixing step
-    h ^= h >> 33;
-    h *= 0xff51afd7ed558ccd;
-    h ^= h >> 33;
-    h *= 0xc4ceb9fe1a85ec53;
-    h ^= h >> 33;
-    return std::format("{:x}", h);
+    std::stringstream ss; ss << std::hex << h;
+    return ss.str().substr(0, 16);
+}
+
+std::vector<std::string> split(const std::string& s, char delim) {
+    std::vector<std::string> parts;
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, delim)) parts.push_back(item);
+    return parts;
 }
 
 std::string quote_arg(const std::string& arg) {
@@ -150,6 +229,7 @@ Config init_config() {
     cfg.current_project = fs::current_path();
     cfg.project_hash = compute_hash(cfg.current_project.string());
     cfg.project_env_path = cfg.envs_root / cfg.project_hash;
+    cfg.db_file = cfg.spip_root / "knowledge_base.db";
 
     return cfg;
 }
@@ -497,7 +577,33 @@ std::vector<std::string> get_all_versions(const std::string& pkg) {
     return versions;
 }
 
-PackageInfo get_package_info(const std::string& pkg, const std::string& version = "") {
+int score_wheel(const std::string& url, const std::string& target_py = "3.12") {
+    int score = 0;
+    std::string lower = url;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    
+    // Platform matching (Mac ARM64 priority)
+    if (lower.find("macosx") != std::string::npos) {
+        if (lower.find("arm64") != std::string::npos) score += 1000;
+        else if (lower.find("universal2") != std::string::npos) score += 500;
+        else if (lower.find("x86_64") != std::string::npos) score += 100;
+    } else if (lower.find("none-any.whl") != std::string::npos) {
+        score += 50;
+    } else {
+        return -1; // Incompatible platform (linux/win)
+    }
+
+    // Python version matching
+    std::string py_tag = "cp" + target_py;
+    py_tag.erase(std::remove(py_tag.begin(), py_tag.end(), '.'), py_tag.end());
+    if (lower.find(py_tag) != std::string::npos) score += 200;
+    else if (lower.find("py3-none-any") != std::string::npos) score += 100;
+    else if (lower.find("py2.py3-none-any") != std::string::npos) score += 100;
+
+    return score;
+}
+
+PackageInfo get_package_info(const std::string& pkg, const std::string& version = "", const std::string& target_py = "3.12") {
     fs::path db_file = get_db_path(pkg);
     if (!fs::exists(db_file)) {
         std::cout << YELLOW << "⚠️ Metadata for " << pkg << " not in local DB. Fetching..." << RESET << std::endl;
@@ -585,11 +691,18 @@ PackageInfo get_package_info(const std::string& pkg, const std::string& version 
             if (open_bracket != std::string::npos && balance == 0) {
                 std::string release_data = content.substr(open_bracket, close_bracket - open_bracket + 1);
                 
-                // Prefer wheel
                 std::regex url_re("\"url\":\\s*\"(https://[^\"]*\\.whl)\"");
-                std::smatch um;
-                if (std::regex_search(release_data, um, url_re)) {
-                    info.wheel_url = um[1];
+                auto wheels_begin = std::sregex_iterator(release_data.begin(), release_data.end(), url_re);
+                auto wheels_end = std::sregex_iterator();
+                
+                int best_score = -1;
+                for (std::sregex_iterator it = wheels_begin; it != wheels_end; ++it) {
+                    std::string url = (*it)[1].str();
+                    int s = score_wheel(url, target_py);
+                    if (s > best_score) {
+                        best_score = s;
+                        info.wheel_url = url;
+                    }
                 }
             }
         }
@@ -615,7 +728,7 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         
         if (installed.count(lower_name)) continue;
         
-        // Use specific version ONLY for the first requested package if provided
+        // Try to pass target_py if we can infer it (harder here, but default 3.12)
         PackageInfo info = (i == 1 && !version.empty()) ? get_package_info(name, version) : get_package_info(name);
         
         if (info.wheel_url.empty()) {
@@ -1286,6 +1399,18 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
     std::cout << std::endl << GREEN << "✔️  Parallel download complete." << RESET << std::endl;
 }
 
+std::string extract_exception(const std::string& output) {
+    // Look for the last line of a traceback or a stand-alone Error/Exception
+    std::regex err_re(R"(([a-zA-Z0-9_\.]+(Error|Exception):.*))");
+    auto words_begin = std::sregex_iterator(output.begin(), output.end(), err_re);
+    auto words_end = std::sregex_iterator();
+    std::string last_err = "";
+    for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+        last_err = (*i)[1].str();
+    }
+    return last_err;
+}
+
 void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto", bool profile = false, bool no_cleanup = false, int revision_limit = -1, bool test_all_revisions = false) {
     std::cout << MAGENTA << "🧪 Starting Build Server Mode (Matrix Test) for " << BOLD << pkg << RESET << std::endl;
     if (profile) std::cout << YELLOW << "📊 Profiling mode enabled." << RESET << std::endl;
@@ -1375,11 +1500,13 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         std::string code = get_exec_output(cmd);
         if (code.empty() || code.find("Error") != std::string::npos || code.find("❌") != std::string::npos) {
             std::cout << YELLOW << "⚠️ LLM generation failed, returned error, or API key missing. Using robust fallback." << RESET << std::endl;
-            code = "import " + pkg + "\n" +
-                   "print(f'Successfully imported " + pkg + "')\n" +
+            std::string mod_pkg = pkg;
+            std::replace(mod_pkg.begin(), mod_pkg.end(), '-', '_');
+            code = "import " + mod_pkg + "\n" +
+                   "print(f'Successfully imported " + mod_pkg + "')\n" +
                    "try:\n" +
-                   "    import " + pkg + ".utils\n" +
-                   "    print('Successfully imported " + pkg + ".utils')\n" +
+                   "    import " + mod_pkg + ".utils\n" +
+                   "    print('Successfully imported " + mod_pkg + ".utils')\n" +
                    "except ImportError: pass\n";
         }
         test_script = fs::current_path() / ("test_" + pkg + "_gen.py");
@@ -1395,22 +1522,53 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     struct ErrorLog { std::string version; std::string python; std::string output; };
     std::vector<ErrorLog> error_logs;
 
-    int ver_idx = 0;
     int total_vers = versions.size();
+    fs::path state_file = cfg.envs_root / (".spip_matrix_state_" + pkg + ".json");
+    std::map<std::string, Result> state_results;
+    
+    // Load existing state
+    if (fs::exists(state_file)) {
+        std::ifstream ifs(state_file);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty()) continue;
+            // Format: version|install|pkg_tests|custom_test|wall|cpu|mem|disk
+            auto parts = split(line, '|');
+            if (parts.size() >= 8) {
+                Result r { parts[0], parts[1]=="1", parts[2]=="1", parts[3]=="1", 
+                           {std::stod(parts[5]), (long)std::stoll(parts[6]), std::stod(parts[4]), (int64_t)std::stoll(parts[7])} };
+                state_results[r.version] = r;
+            }
+        }
+    }
+
+    // Filter out already done versions
+    std::vector<std::string> to_do;
+    for (const auto& v : versions) {
+        if (state_results.find(v) == state_results.end()) to_do.push_back(v);
+        else results.push_back(state_results[v]);
+    }
+
+    if (to_do.empty() && !versions.empty()) {
+        std::cout << GREEN << "✨ All selected versions already tested. Displaying cached results." << RESET << std::endl;
+    } else {
+        std::cout << BLUE << "📊 Versions to test: " << to_do.size() << " (already done: " << (versions.size() - to_do.size()) << ")" << RESET << std::endl;
+    }
 
     // PARALLEL SETUP
     unsigned int max_threads = std::thread::hardware_concurrency(); if(max_threads==0) max_threads=4;
     std::cout << MAGENTA << "⚡ Parallel execution with " << max_threads << " threads." << RESET << std::endl;
     
     std::atomic<size_t> g_idx{0};
-    std::mutex m_out, m_res;
+    std::mutex m_out, m_res, m_state;
     std::vector<std::thread> workers;
+    ErrorKnowledgeBase kb(cfg.db_file);
     
     auto worker_task = [&]() {
         while(true) {
             size_t task_i = g_idx.fetch_add(1);
-            if(task_i >= versions.size()) break;
-            const auto& ver = versions[task_i];
+            if(task_i >= to_do.size()) break;
+            const auto& ver = to_do[task_i];
             
             { 
                 std::lock_guard<std::mutex> l(m_out);
@@ -1489,7 +1647,20 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             bool installed = false;
             if (fs::exists(sp / p_name) || fs::exists(sp / (p_name + ".py"))) installed = true;
             else if (fs::exists(sp / p_name_alt) || fs::exists(sp / (p_name_alt + ".py"))) installed = true;
-            // Also check for .dist-info to be sure? Not strictly needed if folder exists.
+            
+            // Fallback: Check for any .dist-info that starts with our safe name
+            if (!installed) {
+                for (const auto& entry : fs::directory_iterator(sp)) {
+                    std::string entry_name = entry.path().filename().string();
+                    std::transform(entry_name.begin(), entry_name.end(), entry_name.begin(), ::tolower);
+                    std::replace(entry_name.begin(), entry_name.end(), '-', '_');
+                    
+                    if (entry_name.find(p_name_alt) == 0 && entry_name.find(".dist-info") != std::string::npos) {
+                        installed = true;
+                        break;
+                    }
+                }
+            }
             
             if (installed) {
                 res.install = true;
@@ -1566,6 +1737,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
                       if (std::regex_search(test_out, m, collections_re)) {
                           std::string name = m[1].str();
+                          std::string exc_found = extract_exception(test_out);
                           std::cout << YELLOW << "🩹 Detected legacy 'collections." << name << "' issue. Injecting compatibility shim..." << RESET << std::endl;
                           fs::path site_packages = get_site_packages(m_cfg);
                           if (!site_packages.empty()) {
@@ -1576,11 +1748,13 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                               ofs << "    if not hasattr(collections, _n) and hasattr(collections.abc, _n):\n";
                               ofs << "        setattr(collections, _n, getattr(collections.abc, _n))\n";
                               action_taken = true;
+                              kb.store(pkg, target_py, exc_found, "Inject sitecustomize.py shim");
                           }
                       }
 
                       if (!action_taken && (std::regex_search(test_out, m, import_err_re) || std::regex_search(test_out, m, mod_err_re))) {
                          std::string missing_pkg = m[1].str();
+                         std::string exc_found = extract_exception(test_out);
                          
                          if (missing_pkg == "distutils") missing_pkg = "setuptools";
                          if (missing_pkg == "path") missing_pkg = "path.py"; // Common confusion, or 'jaraco.path' ? 'path' usually refers to 'path.py' on PyPI or just 'path'
@@ -1590,6 +1764,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                              try {
                                  resolve_and_install(m_cfg, {missing_pkg});
                                  action_taken = true;
+                                 kb.store(pkg, target_py, exc_found, "install " + missing_pkg);
                              } catch (...) {
                                  std::cout << RED << "❌ Failed to install " << missing_pkg << RESET << std::endl;
                              }
@@ -1604,12 +1779,25 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                           }
                      }
 
-                     if (!action_taken) {
-                         // No recoverable error found, or tests passed/failed on other grounds
-                         // Run standard system for result
-                         success = run_final();
-                         break;
-                     } 
+                      if (!action_taken) {
+                          // Try running from worktree root if site-packages run was empty or failed early
+                          if (test_out.find("no tests ran") != std::string::npos || (attempt == 0 && !success)) {
+                              std::string root_pytest_cmd = std::format("{} -m pytest {} {}", quote_arg(python_bin.string()), quote_arg(matrix_path.string()), pytest_flags);
+                              std::string root_test_out = get_exec_output(root_pytest_cmd + " 2>&1");
+                              if (root_test_out.find("no tests ran") == std::string::npos && root_test_out.find("ERROR") == std::string::npos) {
+                                  std::cout << GREEN << "✨ Tests found in worktree root. Retrying from there..." << RESET << std::endl;
+                                  test_out = root_test_out;
+                                  pytest_cmd = root_pytest_cmd;
+                                  // Re-check regexes against new output in next iteration if needed,
+                                  // but for now let's just use this as the primary result.
+                              }
+                          }
+                          
+                          // No recoverable error found, or tests passed/failed on other grounds
+                          // Run standard system for result
+                          success = run_final();
+                          break;
+                      } 
                      // If action taken, loop continues to retry
                  }
                  res.pkg_tests = success;
@@ -1617,24 +1805,77 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                  std::cout << YELLOW << "⚠️ Could not find package dir for tests. Skipping pkg tests." << RESET << std::endl;
              }
 
-            // 3. Run custom/gen test
+            // 3. Run custom/gen test with self-healing
             {
                 std::lock_guard<std::mutex> l(m_out);
                 std::cout << CYAN << "🧪 Running custom test script..." << RESET << std::endl;
             }
-            std::string run_custom = std::format("{} {}", quote_arg(python_bin.string()), quote_arg(test_script.string()));
-            std::string custom_out = get_exec_output(run_custom);
-            {
-                std::lock_guard<std::mutex> l(m_out);
-                std::cout << custom_out << (custom_out.empty() ? "" : "\n");
-            }
             
-            if (custom_out.find("Traceback") != std::string::npos || custom_out.find("Error:") != std::string::npos) {
-                res.custom_test = false;
+            bool custom_success = false;
+            std::string last_custom_out = "";
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                std::string run_custom = std::format("{} {}", quote_arg(python_bin.string()), quote_arg(test_script.string()));
+                std::string custom_out = get_exec_output(run_custom + " 2>&1");
+                last_custom_out = custom_out;
+                
+                bool action_taken = false;
+                std::regex mod_err_re(R"(ModuleNotFoundError: No module named '?([a-zA-Z0-9_\-]+)'?)");
+                std::regex collections_re(R"(ImportError: cannot import name '([a-zA-Z]+)' from 'collections')");
+                std::smatch m;
+
+                if (std::regex_search(custom_out, m, collections_re)) {
+                    std::string name = m[1].str();
+                    std::string exc_found = extract_exception(custom_out);
+                    std::cout << YELLOW << "🩹 [CustomTest] Detected legacy 'collections." << name << "' issue. Injecting shim..." << RESET << std::endl;
+                    fs::path sp = get_site_packages(m_cfg);
+                    if (!sp.empty()) {
+                        fs::path sc_path = sp / "sitecustomize.py";
+                        std::ofstream ofs(sc_path, std::ios::app);
+                        ofs << "\nimport collections\nimport collections.abc\n";
+                        ofs << "for _n in ['Mapping', 'MutableMapping', 'Sequence', 'MutableSequence', 'Iterable', 'MutableSet', 'Callable', 'Set']:\n";
+                        ofs << "    if not hasattr(collections, _n) and hasattr(collections.abc, _n):\n";
+                        ofs << "        setattr(collections, _n, getattr(collections.abc, _n))\n";
+                        action_taken = true;
+                        kb.store(pkg, target_py, exc_found, "Inject sitecustomize.py shim");
+                    }
+                }
+
+                if (!action_taken && std::regex_search(custom_out, m, mod_err_re)) {
+                    std::string missing_pkg = m[1].str();
+                    std::string exc_found = extract_exception(custom_out);
+                    if (missing_pkg == "distutils") missing_pkg = "setuptools";
+                    if (missing_pkg == "path") missing_pkg = "path.py";
+                    if (missing_pkg != p_name) {
+                        std::cout << YELLOW << "⚠️ [CustomTest] Missing dependency: " << missing_pkg << ". Installing..." << RESET << std::endl;
+                        try { 
+                            resolve_and_install(m_cfg, {missing_pkg}); 
+                            action_taken = true; 
+                            kb.store(pkg, target_py, exc_found, "install " + missing_pkg);
+                        } catch (...) {}
+                    }
+                }
+
+                if (custom_out.find("Traceback") == std::string::npos && custom_out.find("Error:") == std::string::npos) {
+                    {
+                        std::lock_guard<std::mutex> l(m_out);
+                        std::cout << custom_out << (custom_out.empty() ? "" : "\n");
+                    }
+                    custom_success = true;
+                    break;
+                }
+                
+                if (!action_taken) {
+                    std::lock_guard<std::mutex> l(m_out);
+                    std::cout << custom_out << "\n";
+                    break;
+                }
+            }
+            res.custom_test = custom_success;
+            if (!custom_success) {
                 std::lock_guard<std::mutex> l(m_res);
-                error_logs.push_back({ver, target_py, custom_out});
-            } else {
-                res.custom_test = true;
+                std::string exc_found = extract_exception(last_custom_out);
+                if (!exc_found.empty()) kb.store(pkg, target_py, exc_found, "");
+                // error_logs.push_back({ver, target_py, "Custom test failed after retries"});
             }
         }
 
@@ -1646,6 +1887,12 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         {
             std::lock_guard<std::mutex> l(m_res);
             results.push_back(res);
+            
+            // Atomically update state file
+            std::lock_guard<std::mutex> ls(m_state);
+            std::ofstream ofs(state_file, std::ios::app);
+            ofs << res.version << "|" << (res.install ? "1" : "0") << "|" << (res.pkg_tests ? "1" : "0") << "|" << (res.custom_test ? "1" : "0") << "|"
+                << res.stats.wall_time_seconds << "|" << res.stats.cpu_time_seconds << "|" << res.stats.peak_memory_kb << "|" << res.stats.disk_delta_bytes << "\n";
         }
 
         // Thread-local cleanup necessary for parallel unique paths
@@ -1728,6 +1975,19 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                 (r.install ? GREEN + "PASS" : RED + "FAIL") + RESET,
                 (r.pkg_tests ? GREEN + "PASS" : YELLOW + "FAIL/SKIP") + RESET,
                 (r.custom_test ? GREEN + "PASS" : RED + "FAIL") + RESET) << std::endl;
+        }
+    }
+
+    auto learned_fixes = kb.get_fixes_for_pkg(pkg);
+    if (!learned_fixes.empty()) {
+        std::cout << "\n" << BOLD << BLUE << "💡 Suggested Fixes (from Knowledge Base for " << pkg << "):" << RESET << std::endl;
+        std::set<std::string> seen_fixes;
+        for (const auto& f : learned_fixes) {
+            std::string key = f.first + " -> " + f.second;
+            if (f.second != "" && seen_fixes.find(key) == seen_fixes.end()) {
+                std::cout << "  - " << YELLOW << f.first << RESET << " -> " << GREEN << f.second << RESET << std::endl;
+                seen_fixes.insert(key);
+            }
         }
     }
 }
