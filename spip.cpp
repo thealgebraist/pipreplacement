@@ -1022,7 +1022,7 @@ void trim_environment(const Config& cfg, const std::string& script_path) {
     }
 }
 
-void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "") {
+void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "3") {
     std::cout << MAGENTA << "🧪 Starting Build Server Mode (Matrix Test) for " << BOLD << pkg << RESET << std::endl;
     
     std::vector<std::string> versions = get_all_versions(pkg);
@@ -1032,6 +1032,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     }
     
     std::cout << BLUE << "📊 Found " << versions.size() << " versions. Testing all..." << RESET << std::endl;
+    std::cout << BLUE << "🐍 Using Python Base: " << GREEN << python_version << RESET << std::endl;
     
     fs::path test_script = custom_test_script;
     if (test_script.empty()) {
@@ -1064,8 +1065,11 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         std::replace(branch.begin(), branch.end(), '.', '_');
         
         // Setup clean env from base
-        std::string base_branch = "base/3"; // Default to python 3
-        if (!branch_exists(cfg, base_branch)) create_base_version(cfg, "3");
+        std::string base_branch = "base/" + python_version;
+        if (!branch_exists(cfg, base_branch)) {
+            std::cout << YELLOW << "⚠️ Base version " << python_version << " not found. Attempting to bootstrap..." << RESET << std::endl;
+            create_base_version(cfg, python_version);
+        }
         
         std::string br_cmd = std::format("cd {} && git branch -D {} 2>/dev/null; git branch {} {}", 
             quote_arg(cfg.repo_path.string()), quote_arg(branch), quote_arg(branch), quote_arg(base_branch));
@@ -1449,7 +1453,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
         std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle|matrix> [args...]" << std::endl;
         std::cout << "  cleanup|gc [--all] - Perform maintenance, optionally remove all environments" << std::endl;
-        std::cout << "  matrix <pkg> [test.py] - Build-server mode: test all versions of a package" << std::endl;
+        std::cout << "  matrix <pkg> [--python version] [test.py] - Build-server mode: test all versions of a package" << std::endl;
         return;
     }
     std::string command = args[0];
@@ -1682,10 +1686,18 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         freeze_environment(cfg, args[1]);
     }
     else if (command == "matrix") {
-        if (!require_args(args, 2, "Usage: spip matrix <package> [test_script.py]")) return;
+        if (!require_args(args, 2, "Usage: spip matrix <package> [--python version] [test_script.py]")) return;
         std::string pkg = args[1];
-        std::string test_script = (args.size() > 2) ? args[2] : "";
-        matrix_test(cfg, pkg, test_script);
+        std::string test_script = "";
+        std::string python_ver = "3";
+        for (size_t i = 2; i < args.size(); ++i) {
+            if (args[i] == "--python" && i + 1 < args.size()) {
+                python_ver = args[++i];
+            } else if (test_script.empty()) {
+                test_script = args[i];
+            }
+        }
+        matrix_test(cfg, pkg, test_script, python_ver);
     }
     else if (command == "list") {
         ensure_dirs(cfg);
