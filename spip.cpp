@@ -20,6 +20,8 @@
 
 namespace fs = std::filesystem;
 
+uintmax_t get_dir_size(const fs::path& p);
+
 struct ResourceUsage {
     double cpu_time_seconds;
     long peak_memory_kb;
@@ -1172,8 +1174,9 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
     std::cout << std::endl << GREEN << "✔️  Parallel download complete." << RESET << std::endl;
 }
 
-void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto") {
+void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto", bool profile = false, bool no_cleanup = false) {
     std::cout << MAGENTA << "🧪 Starting Build Server Mode (Matrix Test) for " << BOLD << pkg << RESET << std::endl;
+    if (profile) std::cout << YELLOW << "📊 Profiling mode enabled." << RESET << std::endl;
     
     std::vector<std::string> versions = get_all_versions(pkg);
     if (versions.empty()) {
@@ -1203,6 +1206,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     
     // Pre-download all needed files for all versions
     std::cout << MAGENTA << "🔍 Resolving all dependencies for matrix..." << RESET << std::endl;
+    ResourceProfiler* res_prof = profile ? new ResourceProfiler() : nullptr;
     std::map<std::string, PackageInfo> all_needed;
     for (const auto& ver : versions) {
         auto resolved = resolve_only({pkg}, ver);
@@ -1210,10 +1214,22 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             all_needed[id] = info;
         }
     }
+    if (profile && res_prof) {
+        auto stats = res_prof->stop();
+        std::cout << BLUE << "  [Profile] Resolution: " << stats.wall_time_seconds << "s wall, " << stats.cpu_time_seconds << "s CPU" << RESET << std::endl;
+        delete res_prof;
+    }
     
     std::vector<PackageInfo> info_list;
     for (const auto& [id, info] : all_needed) info_list.push_back(info);
+    
+    res_prof = profile ? new ResourceProfiler(cfg.spip_root) : nullptr;
     parallel_download(cfg, info_list);
+    if (profile && res_prof) {
+        auto stats = res_prof->stop();
+        std::cout << BLUE << "  [Profile] Download: " << stats.wall_time_seconds << "s wall, Disk delta: " << (stats.disk_delta_bytes / 1024) << " KB" << RESET << std::endl;
+        delete res_prof;
+    }
 
     fs::path test_script = custom_test_script;
     if (test_script.empty()) {
@@ -1240,13 +1256,13 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         os.close();
     }
 
-    struct Result { std::string version; bool install; bool pkg_tests; bool custom_test; };
+    struct Result { std::string version; bool install; bool pkg_tests; bool custom_test; ResourceUsage stats; };
     std::vector<Result> results;
 
     for (const auto& ver : versions) {
         std::cout << "\n" << BOLD << BLUE << "════════════════════════════════════════════════════════════" << RESET << std::endl;
         
-        Result res { ver, false, false, false };
+        Result res { ver, false, false, false, {0,0,0,0} };
         
         PackageInfo v_info = get_package_info(pkg, ver);
         std::string target_py = python_version;
@@ -1257,26 +1273,30 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         std::cout << BOLD << "🚀 Testing Version: " << GREEN << ver << RESET 
                   << " (Python " << YELLOW << target_py << RESET << ")" << std::endl;
 
-        std::string branch = "matrix/" + cfg.project_hash + "/" + ver;
-        std::replace(branch.begin(), branch.end(), '.', '_');
+        ResourceProfiler* v_prof = profile ? new ResourceProfiler(cfg.envs_root) : nullptr;
+
+        // Use a single stable path for the matrix test to avoid FS overhead
+        fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash);
         
-        // Setup clean env from base
+        // Setup/Refresh worktree
         std::string base_branch = "base/" + target_py;
         if (!branch_exists(cfg, base_branch)) {
             std::cout << YELLOW << "⚠️ Base version " << target_py << " not found. Attempting to bootstrap..." << RESET << std::endl;
             create_base_version(cfg, target_py);
         }
-        
-        std::string br_cmd = std::format("cd {} && git branch -D {} 2>/dev/null; git branch {} {}", 
-            quote_arg(cfg.repo_path.string()), quote_arg(branch), quote_arg(branch), quote_arg(base_branch));
-        std::system(br_cmd.c_str());
-        
-        fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash + "_" + ver);
-        if (fs::exists(matrix_path)) fs::remove_all(matrix_path);
-        
-        std::string wt_cmd = std::format("cd {} && git worktree add {} {}", 
-            quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(branch));
-        std::system(wt_cmd.c_str());
+
+        if (!fs::exists(matrix_path)) {
+            // Create worktree with a detached HEAD to avoid "already used" errors
+            std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
+                quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
+            std::system(wt_cmd.c_str());
+        } else {
+            // Optimized refresh: only reset files and remove untracked site-packages
+            // Full 'clean -fdx' is slow because it scans everything.
+            std::string reset_cmd = std::format("cd {} && git checkout --detach {} && git reset --hard {} && git clean -fd site-packages 2>/dev/null", 
+                quote_arg(matrix_path.string()), quote_arg(base_branch), quote_arg(base_branch));
+            std::system(reset_cmd.c_str());
+        }
 
         Config m_cfg = cfg;
         m_cfg.project_env_path = matrix_path;
@@ -1316,24 +1336,50 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             res.custom_test = (r2 == 0);
         }
 
+        if (profile && v_prof) {
+            res.stats = v_prof->stop();
+            delete v_prof;
+        }
+
         results.push_back(res);
-        
-        // Cleanup worktree
-        std::system(std::format("cd {} && git worktree remove --force {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string())).c_str());
-        std::system(std::format("cd {} && git branch -D {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(branch)).c_str());
+    }
+
+    // Cleanup the reusable worktree at the very end unless requested otherwise
+    if (!no_cleanup) {
+        fs::path final_matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash);
+        if (fs::exists(final_matrix_path)) {
+            std::cout << MAGENTA << "🧹 Cleaning up matrix worktree..." << RESET << std::endl;
+            std::system(std::format("cd {} && git worktree remove --force {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(final_matrix_path.string())).c_str());
+        }
+    } else {
+        std::cout << BLUE << "ℹ️ Skipping final cleanup (reusable worktree preserved)." << RESET << std::endl;
     }
 
     std::cout << "\n" << BOLD << MAGENTA << "🏁 Matrix Test Summary for " << pkg << RESET << std::endl;
-    std::cout << std::format("{:<15} {:<10} {:<15} {:<15}", "Version", "Install", "Pkg Tests", "Custom Test") << std::endl;
-    std::cout << "------------------------------------------------------------" << std::endl;
+    if (profile) {
+        std::cout << std::format("{:<15} {:<10} {:<15} {:<15} {:<15} {:<15}", "Version", "Install", "Pkg Tests", "Custom Test", "Wall Time", "CPU Time") << std::endl;
+        std::cout << "--------------------------------------------------------------------------------------------" << std::endl;
+    } else {
+        std::cout << std::format("{:<15} {:<10} {:<15} {:<15}", "Version", "Install", "Pkg Tests", "Custom Test") << std::endl;
+        std::cout << "------------------------------------------------------------" << std::endl;
+    }
+    
     for (const auto& r : results) {
-        // ANSI codes (e.g. GREEN, RESET) take up characters but don't occupy space in terminal.
-        // We add 9 to the width to compensate for the invisible ANSI codes.
-        std::cout << std::format("{:<15} {:<19} {:<24} {:<24}", 
-            r.version, 
-            (r.install ? GREEN + "PASS" : RED + "FAIL") + RESET,
-            (r.pkg_tests ? GREEN + "PASS" : YELLOW + "FAIL/SKIP") + RESET,
-            (r.custom_test ? GREEN + "PASS" : RED + "FAIL") + RESET) << std::endl;
+        if (profile) {
+            std::cout << std::format("{:<15} {:<19} {:<24} {:<24} {:<15.2f} {:<15.2f}", 
+                r.version, 
+                (r.install ? GREEN + "PASS" : RED + "FAIL") + RESET,
+                (r.pkg_tests ? GREEN + "PASS" : YELLOW + "FAIL/SKIP") + RESET,
+                (r.custom_test ? GREEN + "PASS" : RED + "FAIL") + RESET,
+                r.stats.wall_time_seconds,
+                r.stats.cpu_time_seconds) << std::endl;
+        } else {
+            std::cout << std::format("{:<15} {:<19} {:<24} {:<24}", 
+                r.version, 
+                (r.install ? GREEN + "PASS" : RED + "FAIL") + RESET,
+                (r.pkg_tests ? GREEN + "PASS" : YELLOW + "FAIL/SKIP") + RESET,
+                (r.custom_test ? GREEN + "PASS" : RED + "FAIL") + RESET) << std::endl;
+        }
     }
 }
 
@@ -1649,7 +1695,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
         std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle|matrix> [args...]" << std::endl;
         std::cout << "  cleanup|gc [--all] - Perform maintenance, optionally remove all environments" << std::endl;
-        std::cout << "  matrix <pkg> [--python version] [test.py] - Build-server mode: test all versions of a package" << std::endl;
+        std::cout << "  matrix <pkg> [--python version] [--profile] [--no-cleanup] [test.py] - Build-server mode: test all versions of a package" << std::endl;
         return;
     }
     std::string command = args[0];
@@ -1882,18 +1928,24 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         freeze_environment(cfg, args[1]);
     }
     else if (command == "matrix") {
-        if (!require_args(args, 2, "Usage: spip matrix <package> [--python version] [test_script.py]")) return;
+        if (!require_args(args, 2, "Usage: spip matrix <package> [--python version] [--profile] [test_script.py]")) return;
         std::string pkg = args[1];
         std::string test_script = "";
         std::string python_ver = "auto";
+        bool profile = false;
+        bool no_cleanup = false;
         for (size_t i = 2; i < args.size(); ++i) {
             if (args[i] == "--python" && i + 1 < args.size()) {
                 python_ver = args[++i];
+            } else if (args[i] == "--profile") {
+                profile = true;
+            } else if (args[i] == "--no-cleanup") {
+                no_cleanup = true;
             } else if (test_script.empty()) {
                 test_script = args[i];
             }
         }
-        matrix_test(cfg, pkg, test_script, python_ver);
+        matrix_test(cfg, pkg, test_script, python_ver, profile, no_cleanup);
     }
     else if (command == "list") {
         ensure_dirs(cfg);

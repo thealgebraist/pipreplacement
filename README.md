@@ -18,7 +18,9 @@ A safer, version-controlled replacement for `pip` and `venv`.
 - `spip use <version>`: Switch project to a specific Python version.
 - `spip fetch-db`: Sync the local PyPI metadata vault.
 - `spip list`: Show managed environments and total disk usage of the local vault.
-- `spip matrix <pkg> [--python version] [test.py]`: Build-server mode. Tests all available versions of a package for installability and compatibility using a custom or AI-generated test script against a specific Python version.
+- `spip matrix <pkg> [--python version] [--profile] [--no-cleanup] [test.py]`: Build-server mode. Tests all available versions of a package.
+  - `--profile`: Track and display CPU, wall time, and disk usage for each version.
+  - `--no-cleanup`: Preserve the optimized reusable worktree for faster subsequent runs.
 - `spip gc [--all]`: Cleanup orphaned environments, temporary files, and compact repositories. Use --all to remove all environments.
 - `spip log`: Show environment change history.
 
