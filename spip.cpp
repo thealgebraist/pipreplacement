@@ -1725,15 +1725,38 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                          return std::system(pytest_cmd.c_str()) == 0;
                      };
 
-                     // Regexes
-                     std::regex import_err_re(R"(ImportError: ([a-zA-Z0-9_\-]+) is a required dependency)");
-                     std::regex mod_err_re(R"(ModuleNotFoundError: No module named '?([a-zA-Z0-9_\-]+)'?)");
+                      // Knowledge Base Lookup
+                      std::string exc_found = extract_exception(test_out);
+                      bool action_taken = false;
+                      if (!exc_found.empty()) {
+                          std::string learned_fix = kb.lookup_fix(exc_found);
+                          if (!learned_fix.empty()) {
+                              std::cout << BLUE << "💡 Found learned fix for \"" << exc_found << "\": " << GREEN << learned_fix << RESET << std::endl;
+                              if (learned_fix.starts_with("install ")) {
+                                  try { resolve_and_install(m_cfg, {learned_fix.substr(8)}); action_taken = true; } catch (...) {}
+                              } else if (learned_fix == "Inject sitecustomize.py shim") {
+                                  fs::path sp = get_site_packages(m_cfg);
+                                  if (!sp.empty()) {
+                                      std::ofstream ofs(sp / "sitecustomize.py", std::ios::app);
+                                      ofs << "\nimport collections\nimport collections.abc\n"
+                                          << "for _n in ['Mapping', 'MutableMapping', 'Sequence', 'MutableSequence', 'Iterable', 'MutableSet', 'Callable', 'Set']:\n"
+                                          << "    if not hasattr(collections, _n) and hasattr(collections.abc, _n): setattr(collections, _n, getattr(collections.abc, _n))\n";
+                                      action_taken = true;
+                                  }
+                              }
+                          }
+                      }
+
+                      // Regexes
+                      std::regex import_err_re(R"(ImportError: ([a-zA-Z0-9_\-]+) is a required dependency)");
+                      std::regex mod_err_re(R"(ModuleNotFoundError: No module named '?([a-zA-Z0-9_\-]+)'?)");
                       std::regex rel_import_re(R"(ImportError: attempted relative import with no known parent package)");
                       // Legacy collections patch for Python 3.10+
                       std::regex collections_re(R"(ImportError: cannot import name '([a-zA-Z]+)' from 'collections')");
                       std::smatch m;
 
-                      bool action_taken = false;
+                      // Regexes
+                      // ... (removed redundant bool action_taken)
 
                       if (std::regex_search(test_out, m, collections_re)) {
                           std::string name = m[1].str();
@@ -1818,7 +1841,26 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                 std::string custom_out = get_exec_output(run_custom + " 2>&1");
                 last_custom_out = custom_out;
                 
+                std::string exc_found_kb = extract_exception(custom_out);
                 bool action_taken = false;
+                if (!exc_found_kb.empty()) {
+                    std::string learned_fix = kb.lookup_fix(exc_found_kb);
+                    if (!learned_fix.empty()) {
+                        std::cout << BLUE << "💡 Found learned fix for \"" << exc_found_kb << "\": " << GREEN << learned_fix << RESET << std::endl;
+                        if (learned_fix.starts_with("install ")) {
+                            try { resolve_and_install(m_cfg, {learned_fix.substr(8)}); action_taken = true; } catch (...) {}
+                        } else if (learned_fix == "Inject sitecustomize.py shim") {
+                              fs::path sp = get_site_packages(m_cfg);
+                              if (!sp.empty()) {
+                                  std::ofstream ofs(sp / "sitecustomize.py", std::ios::app);
+                                  ofs << "\nimport collections\nimport collections.abc\n"
+                                      << "for _n in ['Mapping', 'MutableMapping', 'Sequence', 'MutableSequence', 'Iterable', 'MutableSet', 'Callable', 'Set']:\n"
+                                      << "    if not hasattr(collections, _n) and hasattr(collections.abc, _n): setattr(collections, _n, getattr(collections.abc, _n))\n";
+                                  action_taken = true;
+                              }
+                        }
+                    }
+                }
                 std::regex mod_err_re(R"(ModuleNotFoundError: No module named '?([a-zA-Z0-9_\-]+)'?)");
                 std::regex collections_re(R"(ImportError: cannot import name '([a-zA-Z]+)' from 'collections')");
                 std::smatch m;
