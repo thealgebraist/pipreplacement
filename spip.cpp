@@ -182,6 +182,7 @@ void ensure_dirs(const Config& cfg) {
     if (!fs::exists(cfg.envs_root)) fs::create_directories(cfg.envs_root);
     ensure_scripts(cfg);
     if (!fs::exists(cfg.repo_path)) {
+        std::cout << "Creating repo at: " << cfg.repo_path << std::endl;
         fs::create_directories(cfg.repo_path);
         std::string cmd = std::format("cd {} && git init && git commit --allow-empty -m \"Initial commit\"", quote_arg(cfg.repo_path.string()));
         std::system(cmd.c_str());
@@ -192,33 +193,67 @@ void ensure_dirs(const Config& cfg) {
 }
 
 bool branch_exists(const Config& cfg, const std::string& branch) {
-    std::string cmd = std::format("cd {} && git rev-parse --verify {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(branch));
-    return !get_exec_output(cmd).empty();
+    // get_exec_output appends " 2>&1" so we capture stderr too.
+    // If branch doesn't exist, git prints "fatal: ..." which get_exec_output captures.
+    // We must check if output is a valid hash vs error message.
+    std::string cmd = std::format("cd {} && git rev-parse --verify {}", quote_arg(cfg.repo_path.string()), quote_arg(branch));
+    std::string out = get_exec_output(cmd);
+    if (out.empty()) return false;
+    if (out.find("fatal") != std::string::npos) return false;
+    if (out.find("error") != std::string::npos) return false;
+    return true;
 }
 
 void create_base_version(const Config& cfg, const std::string& version) {
     std::string branch = "base/" + version;
     if (branch_exists(cfg, branch)) return;
 
-    std::cout << MAGENTA << "🔨 Bootstrapping base Python " << version << "..." << RESET << std::endl;
-    // Sanitize version to prevent shell injection (S-01)
+    {
+        // Use lock for logging consistency if called from parallel context
+        // But here we rely on stdout mixing being acceptable or protected by caller (it is protected by caller).
+        std::cout << MAGENTA << "🔨 Bootstrapping base Python " << version << "..." << RESET << std::endl;
+    }
+    
+    // Sanitize version
     std::string safe_v = "";
     for(char c : version) if(std::isalnum(c) || c == '.') safe_v += c;
 
     fs::path temp_venv = cfg.spip_root / ("temp_venv_" + safe_v);
-    std::string venv_cmd = std::format("python{} -m venv {}", safe_v, quote_arg(temp_venv.string()));
+    
+    // Try pythonX.Y, fallback to python3 if matching version
+    std::string python_bin = "python" + safe_v;
+    // Check if pythonX.Y exists roughly? Or just try. spip assumes python installed.
+    // We can just try the command.
+    
+    std::string venv_cmd = std::format("{} -m venv {}", python_bin, quote_arg(temp_venv.string()));
     int ret = std::system(venv_cmd.c_str());
+    if (ret != 0) {
+        // Fallback to plain python3 if version matches system or just try python3
+        std::cout << YELLOW << "⚠️ " << python_bin << " not found, trying python3..." << RESET << std::endl;
+        venv_cmd = std::format("python3 -m venv {}", quote_arg(temp_venv.string()));
+        ret = std::system(venv_cmd.c_str());
+    }
+
     if (ret != 0) {
         std::cerr << RED << "❌ Failed to create venv for python " << version << RESET << std::endl;
         std::exit(1);
     }
 
+    // Git command: Handle master vs main
     std::string git_cmd = std::format(
-        "cd \"{}\" && git checkout main && git checkout -b \"{}\" && "
-        "rm -rf * && cp -r \"{}/\"* . && git add -A && git commit -m \"Base Python {}\"",
+        "cd \"{}\" && (git checkout master || git checkout main) && git checkout -b \"{}\" && "
+        "rm -rf * && cp -r \"{}/\"* . && git add -A && git commit -m \"Base Python {}\" && "
+        "(git checkout master || git checkout main)",
         cfg.repo_path.string(), branch, temp_venv.string(), version
     );
-    std::system(git_cmd.c_str());
+    
+    if (std::system(git_cmd.c_str()) != 0) {
+        std::cerr << RED << "❌ Failed to commit base version " << version << RESET << std::endl;
+        // Don't exit, maybe retry? But likely fatal.
+        // Clean up
+        fs::remove_all(temp_venv);
+        std::exit(1);
+    }
     fs::remove_all(temp_venv);
 }
 
@@ -339,11 +374,23 @@ void benchmark_mirrors(Config& cfg) {
 
 void fetch_package_metadata(const Config& cfg, const std::string& pkg) {
     fs::path target = get_db_path(pkg);
-    if (fs::exists(target)) return;
+    if (fs::exists(target) && fs::file_size(target) > 0) return;
+    
+    static std::mutex m_fetch;
+    std::lock_guard<std::mutex> lock(m_fetch);
+    
+    if (fs::exists(target) && fs::file_size(target) > 0) return;
+
     fs::create_directories(target.parent_path());
     std::string url = std::format("{}/pypi/{}/json", cfg.pypi_mirror, pkg);
-    std::string cmd = std::format("curl -s -L \"{}\" -o \"{}\"", url, target.string());
+    // Use temporary file for atomic write
+    fs::path temp_target = target;
+    temp_target += ".tmp";
+    std::string cmd = std::format("curl -s -L \"{}\" -o \"{}\"", url, temp_target.string());
     std::system(cmd.c_str());
+    if (fs::exists(temp_target)) {
+        fs::rename(temp_target, target);
+    }
 }
 
 void db_worker(std::queue<std::string>& q, std::mutex& m, std::atomic<int>& count, int total, Config cfg) {
@@ -460,6 +507,7 @@ PackageInfo get_package_info(const std::string& pkg, const std::string& version 
     std::ifstream ifs(db_file);
     std::string content((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
     PackageInfo info;
+    if (content.empty()) return info;
     info.name = pkg;
     
     if (version.empty()) {
@@ -605,11 +653,19 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
                   << "📦 " << BOLD << name << RESET << " (" << info.version << ")..." << std::endl;
         
         fs::path temp_wheel = cfg.spip_root / (name + "-" + info.version + ".whl");
-        if (!fs::exists(temp_wheel)) {
-            // Use curl's -# (or --progress-bar) for a cleaner progress bar
-            // info.wheel_url is from PyPI JSON but should still be quoted
-            std::string dl_cmd = std::format("curl -L -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(temp_wheel.string()));
-            std::system(dl_cmd.c_str());
+        if (!fs::exists(temp_wheel) || fs::file_size(temp_wheel) == 0) {
+            static std::mutex m_dl;
+            std::lock_guard<std::mutex> lock(m_dl);
+            if (!fs::exists(temp_wheel) || fs::file_size(temp_wheel) == 0) {
+                // Use temporary file for atomic write
+                fs::path partial = temp_wheel;
+                partial += ".part";
+                std::string dl_cmd = std::format("curl -L -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(partial.string()));
+                std::system(dl_cmd.c_str());
+                if (fs::exists(partial)) {
+                    fs::rename(partial, temp_wheel);
+                }
+            }
         }
         
         // Critical: S-02 Safe Extraction to prevent path traversal
@@ -1342,11 +1398,26 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     int ver_idx = 0;
     int total_vers = versions.size();
 
-    for (const auto& ver : versions) {
-        ver_idx++;
-        std::cout << "\n" << BOLD << BLUE << "════════════════════════════════════════════════════════════" << RESET << std::endl;
+    // PARALLEL SETUP
+    unsigned int max_threads = std::thread::hardware_concurrency(); if(max_threads==0) max_threads=4;
+    std::cout << MAGENTA << "⚡ Parallel execution with " << max_threads << " threads." << RESET << std::endl;
+    
+    std::atomic<size_t> g_idx{0};
+    std::mutex m_out, m_res;
+    std::vector<std::thread> workers;
+    
+    auto worker_task = [&]() {
+        while(true) {
+            size_t task_i = g_idx.fetch_add(1);
+            if(task_i >= versions.size()) break;
+            const auto& ver = versions[task_i];
+            
+            { 
+                std::lock_guard<std::mutex> l(m_out);
+                std::cout << "\n" << BOLD << BLUE << "════════════════════════════════════════════════════════════" << RESET << std::endl;
+            }
         
-        Result res { ver, false, false, false, {0,0,0,0} };
+            Result res { ver, false, false, false, {0,0,0,0} };
         
         PackageInfo v_info = get_package_info(pkg, ver);
         std::string target_py = python_version;
@@ -1354,59 +1425,49 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             target_py = parse_python_requirement(v_info.requires_python);
         }
 
-        std::cout << BOLD << "🚀 Testing Version (" << ver_idx << "/" << total_vers << "): " << GREEN << ver << RESET 
-                  << " (Python " << YELLOW << target_py << RESET << ")" << std::endl;
+        {
+            std::lock_guard<std::mutex> l(m_out);
+            std::cout << BOLD << "🚀 Testing Version (" << (task_i + 1) << "/" << total_vers << "): " << GREEN << ver << RESET 
+                      << " (Python " << YELLOW << target_py << RESET << ")" << std::endl;
+        }
 
         ResourceProfiler* v_prof = profile ? new ResourceProfiler(cfg.envs_root) : nullptr;
 
-        // Use a single stable path for the matrix test to avoid FS overhead
-        fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash);
+        // Use a unique path per version for parallel isolation
+        std::string safe_ver = ver;
+        for(char& c : safe_ver) if(!isalnum(c) && c!='.' && c!='-') c = '_';
+        fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash + "_" + safe_ver);
         
+        // Ensure clean start for this version
+        if(fs::exists(matrix_path)) fs::remove_all(matrix_path);
+        
+
         // Setup/Refresh worktree
         std::string base_branch = "base/" + target_py;
-        if (!branch_exists(cfg, base_branch)) {
-            std::cout << YELLOW << "⚠️ Base version " << target_py << " not found. Attempting to bootstrap..." << RESET << std::endl;
-            create_base_version(cfg, target_py);
-        }
-
-        if (fs::exists(matrix_path)) {
-            // Check if it's a valid git repo or stale worktree
-            std::string check_cmd = std::format("cd {} && git status >/dev/null 2>&1", quote_arg(matrix_path.string()));
-            if (std::system(check_cmd.c_str()) != 0) {
-                 std::cout << YELLOW << "⚠️ Stale worktree detected. Cleaning up..." << RESET << std::endl;
-                 fs::remove_all(matrix_path);
-                 std::string prune_cmd = std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string()));
-                 std::system(prune_cmd.c_str());
+        
+        // Sync base branch creation
+        {
+            std::lock_guard<std::mutex> l(m_out);
+            if (!branch_exists(cfg, base_branch)) {
+                std::cout << YELLOW << "⚠️ Base version " << target_py << " not found. Attempting to bootstrap..." << RESET << std::endl;
+                create_base_version(cfg, target_py);
             }
         }
 
-        if (!fs::exists(matrix_path)) {
-            // Create worktree with a detached HEAD to avoid "already used" errors
-            std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
-                quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
-            int ret = std::system(wt_cmd.c_str());
-            if (ret != 0) {
-                // If adding fails, try pruning and force removing
-                 std::string prune_cmd = std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string()));
-                 std::system(prune_cmd.c_str());
-                 if (fs::exists(matrix_path)) fs::remove_all(matrix_path);
-                 std::system(wt_cmd.c_str());
-            }
-        } else {
-            // Optimized refresh: only reset files and remove untracked site-packages
-            // Full 'clean -fdx' is slow because it scans everything.
-            std::string reset_cmd = std::format("cd {} && git checkout --detach {} && git reset --hard {} && git clean -fd site-packages 2>/dev/null", 
-                quote_arg(matrix_path.string()), quote_arg(base_branch), quote_arg(base_branch));
-            if (std::system(reset_cmd.c_str()) != 0) {
-                // If reset fails, standard recovery: nuke and recreate
-                 std::cout << YELLOW << "⚠️ Worktree reset failed. Recreating..." << RESET << std::endl;
-                 fs::remove_all(matrix_path);
-                 std::string prune_cmd = std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string()));
-                 std::system(prune_cmd.c_str());
-                 std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
-                    quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
-                 std::system(wt_cmd.c_str());
-            }
+        // Always create fresh worktree (we deleted it above)
+        // If "already registered" error occurs, we need to prune.
+        std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
+             quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
+             
+        if (std::system(wt_cmd.c_str()) != 0) {
+             // Likely stale metadata. Prune safely.
+             { 
+                 std::lock_guard<std::mutex> l(m_out);
+                 std::system(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
+             }
+             // Retry
+             if (fs::exists(matrix_path)) fs::remove_all(matrix_path);
+             std::system(wt_cmd.c_str());
         }
 
         Config m_cfg = cfg;
@@ -1415,9 +1476,31 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         // 1. Install main package and its dependencies
         try {
             resolve_and_install(m_cfg, {pkg}, ver); // Installs pkg and its runtime deps
-            res.install = true;
+            
+            // Verify installation actually happened
+            fs::path sp = get_site_packages(m_cfg);
+            std::string p_name = pkg; 
+            std::transform(p_name.begin(), p_name.end(), p_name.begin(), ::tolower);
+            
+            // Handle underscore/dash normalization for check
+            std::string p_name_alt = p_name;
+            std::replace(p_name_alt.begin(), p_name_alt.end(), '-', '_');
+            
+            bool installed = false;
+            if (fs::exists(sp / p_name) || fs::exists(sp / (p_name + ".py"))) installed = true;
+            else if (fs::exists(sp / p_name_alt) || fs::exists(sp / (p_name_alt + ".py"))) installed = true;
+            // Also check for .dist-info to be sure? Not strictly needed if folder exists.
+            
+            if (installed) {
+                res.install = true;
+            } else {
+                 std::cout << RED << "❌ Installation verification failed: " << pkg << " files not found." << RESET << std::endl;
+                 res.install = false;
+            }
+
         } catch (...) {
             std::cout << RED << "❌ Installation failed for " << ver << RESET << std::endl;
+            res.install = false;
         }
 
         if (res.install) {
@@ -1456,17 +1539,6 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             fs::path sp = get_site_packages(m_cfg);
             std::string p_name = pkg; std::transform(p_name.begin(), p_name.end(), p_name.begin(), ::tolower);
             fs::path p_path = sp / p_name;
-
-             // REWRITE ENTIRE BLOCK WITH CLEAN LOOP
-             if (fs::exists(p_path)) {
-                 std::string pytest_flags = "--maxfail=1 -q";
-                 bool success = false;
-                 
-                 for (int attempt = 0; attempt < 3; ++attempt) {
-                }
-             } else {
-                 std::cout << YELLOW << "⚠️ Could not find package dir for tests. Skipping pkg tests." << RESET << std::endl;
-             }
              
              // REWRITE ENTIRE BLOCK WITH CLEAN LOOP
              if (fs::exists(p_path)) {
@@ -1485,12 +1557,29 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                      // Regexes
                      std::regex import_err_re(R"(ImportError: ([a-zA-Z0-9_\-]+) is a required dependency)");
                      std::regex mod_err_re(R"(ModuleNotFoundError: No module named '?([a-zA-Z0-9_\-]+)'?)");
-                     std::regex rel_import_re(R"(ImportError: attempted relative import with no known parent package)");
-                     std::smatch m;
+                      std::regex rel_import_re(R"(ImportError: attempted relative import with no known parent package)");
+                      // Legacy collections patch for Python 3.10+
+                      std::regex collections_re(R"(ImportError: cannot import name '([a-zA-Z]+)' from 'collections')");
+                      std::smatch m;
 
-                     bool action_taken = false;
+                      bool action_taken = false;
 
-                     if (std::regex_search(test_out, m, import_err_re) || std::regex_search(test_out, m, mod_err_re)) {
+                      if (std::regex_search(test_out, m, collections_re)) {
+                          std::string name = m[1].str();
+                          std::cout << YELLOW << "🩹 Detected legacy 'collections." << name << "' issue. Injecting compatibility shim..." << RESET << std::endl;
+                          fs::path site_packages = get_site_packages(m_cfg);
+                          if (!site_packages.empty()) {
+                              fs::path sc_path = site_packages / "sitecustomize.py";
+                              std::ofstream ofs(sc_path, std::ios::app);
+                              ofs << "\nimport collections\nimport collections.abc\n";
+                              ofs << "for _n in ['Mapping', 'MutableMapping', 'Sequence', 'MutableSequence', 'Iterable', 'MutableSet', 'Callable', 'Set']:\n";
+                              ofs << "    if not hasattr(collections, _n) and hasattr(collections.abc, _n):\n";
+                              ofs << "        setattr(collections, _n, getattr(collections.abc, _n))\n";
+                              action_taken = true;
+                          }
+                      }
+
+                      if (!action_taken && (std::regex_search(test_out, m, import_err_re) || std::regex_search(test_out, m, mod_err_re))) {
                          std::string missing_pkg = m[1].str();
                          
                          if (missing_pkg == "distutils") missing_pkg = "setuptools";
@@ -1529,13 +1618,20 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
              }
 
             // 3. Run custom/gen test
-            std::cout << CYAN << "🧪 Running custom test script..." << RESET << std::endl;
+            {
+                std::lock_guard<std::mutex> l(m_out);
+                std::cout << CYAN << "🧪 Running custom test script..." << RESET << std::endl;
+            }
             std::string run_custom = std::format("{} {}", quote_arg(python_bin.string()), quote_arg(test_script.string()));
             std::string custom_out = get_exec_output(run_custom);
-            std::cout << custom_out << (custom_out.empty() ? "" : "\n");
+            {
+                std::lock_guard<std::mutex> l(m_out);
+                std::cout << custom_out << (custom_out.empty() ? "" : "\n");
+            }
             
             if (custom_out.find("Traceback") != std::string::npos || custom_out.find("Error:") != std::string::npos) {
                 res.custom_test = false;
+                std::lock_guard<std::mutex> l(m_res);
                 error_logs.push_back({ver, target_py, custom_out});
             } else {
                 res.custom_test = true;
@@ -1547,16 +1643,29 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             delete v_prof;
         }
 
-        results.push_back(res);
-    }
-
-    // Cleanup the reusable worktree at the very end unless requested otherwise
-    if (!no_cleanup) {
-        fs::path final_matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash);
-        if (fs::exists(final_matrix_path)) {
-            std::cout << MAGENTA << "🧹 Cleaning up matrix worktree..." << RESET << std::endl;
-            std::system(std::format("cd {} && git worktree remove --force {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(final_matrix_path.string())).c_str());
+        {
+            std::lock_guard<std::mutex> l(m_res);
+            results.push_back(res);
         }
+
+        // Thread-local cleanup necessary for parallel unique paths
+        if (!no_cleanup) {
+             std::string rm_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()));
+             std::system(rm_cmd.c_str());
+        }
+    } // end while
+    }; // end lambda
+
+    // Launch workers
+    for(int i=0; i<max_threads; ++i) workers.emplace_back(worker_task);
+    
+    // Join all
+    for(auto& t : workers) t.join();
+
+    // Global cleanup
+    if (!no_cleanup) {
+        std::cout << MAGENTA << "🧹 Pruning worktree metadata..." << RESET << std::endl;
+        std::system(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
     } else {
         std::cout << BLUE << "ℹ️ Skipping final cleanup (reusable worktree preserved)." << RESET << std::endl;
     }
@@ -2248,6 +2357,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         freeze_environment(cfg, args[1]);
     }
     else if (command == "matrix") {
+        ensure_dirs(cfg);
         if (args.size() < 2) {
              std::cerr << "Usage: spip matrix <package> [options]" << std::endl;
              return;
