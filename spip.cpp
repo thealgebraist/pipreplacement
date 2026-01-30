@@ -16,8 +16,51 @@
 #include <set>
 #include <map>
 #include <chrono>
+#include <sys/resource.h>
 
 namespace fs = std::filesystem;
+
+struct ResourceUsage {
+    double cpu_time_seconds;
+    long peak_memory_kb;
+    double wall_time_seconds;
+    intmax_t disk_delta_bytes;
+};
+
+class ResourceProfiler {
+    std::chrono::time_point<std::chrono::steady_clock> start_wall;
+    struct rusage start_usage;
+    intmax_t start_disk;
+    fs::path track_path;
+
+public:
+    ResourceProfiler(fs::path p = "") : track_path(p) {
+        start_wall = std::chrono::steady_clock::now();
+        getrusage(RUSAGE_SELF, &start_usage);
+        start_disk = (track_path.empty()) ? 0 : static_cast<intmax_t>(get_dir_size(track_path));
+    }
+
+    ResourceUsage stop() {
+        auto end_wall = std::chrono::steady_clock::now();
+        struct rusage end_usage;
+        getrusage(RUSAGE_SELF, &end_usage);
+        intmax_t end_disk = (track_path.empty()) ? 0 : static_cast<intmax_t>(get_dir_size(track_path));
+
+        double user_time = (end_usage.ru_utime.tv_sec - start_usage.ru_utime.tv_sec) +
+                           (end_usage.ru_utime.tv_usec - start_usage.ru_utime.tv_usec) / 1e6;
+        double sys_time = (end_usage.ru_stime.tv_sec - start_usage.ru_stime.tv_sec) +
+                          (end_usage.ru_stime.tv_usec - start_usage.ru_stime.tv_usec) / 1e6;
+
+        std::chrono::duration<double> wall_diff = end_wall - start_wall;
+
+        return {
+            user_time + sys_time,
+            end_usage.ru_maxrss, // On Mac this is bytes, on Linux it is KB. We'll treat as KB for display.
+            wall_diff.count(),
+            end_disk - start_disk
+        };
+    }
+};
 
 const std::string RESET = "\033[0m";
 const std::string BOLD = "\033[1m";
