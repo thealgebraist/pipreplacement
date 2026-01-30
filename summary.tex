@@ -18,12 +18,11 @@ A new cleanup and maintenance feature has been added to the \texttt{spip} CLI to
 
 \section{New Features}
 \begin{itemize}
-    \item \textbf{New Commands:} Added \texttt{spip gc} as a primary command for garbage collection, also available via the \texttt{spip cleanup} alias. Added support for \texttt{--all} to remove all managed environments.
-    \item \textbf{Disk Usage Statistics:} The tool now reports detailed disk usage before and after cleanup, including sizes for the Git repository, environments, and the package database.
+    \item \textbf{New Commands:} Added \texttt{spip gc} for maintenance and \texttt{spip matrix <pkg>} for build-server mode. \texttt{matrix} mode tests all available versions of a package for installability and functional correctness.
+    \item \textbf{Disk Usage Statistics:} The tool now reports detailed disk usage before and after cleanup.
     \item \textbf{Orphan Pruning:} Automatically identifies and removes environments for projects that no longer exist on the filesystem or have been unused for more than 30 days.
-    \item \textbf{Temporary File Cleanup:} Cleans up \texttt{.whl} files, \texttt{temp\_venv\_} directories, and other temporary artifacts in the \texttt{.spip} root.
-    \item \textbf{Script Maintenance:} Removes unrecognized or obsolete Python scripts from the \texttt{.spip/scripts} directory.
-    \item \textbf{Git Optimization:} Executes \texttt{git gc --prune=now --aggressive} on both the main environment repository and the package metadata database. This is rate-limited to once every 24 hours to prevent excessive system load.
+    \item \textbf{Automated Testing:} \texttt{spip matrix} can automatically generate minimal test scripts using the Gemini LLM to verify package functionality across multiple versions.
+    \item \textbf{Git Optimization:} Executes rate-limited \texttt{git gc} (once every 24 hours) to maintain repository health.
 \end{itemize}
 
 \section{Implementation Details}

@@ -343,7 +343,44 @@ std::vector<std::string> extract_array(const std::string& json, const std::strin
     return result;
 }
 
-PackageInfo get_package_info(const std::string& pkg) {
+std::vector<std::string> get_all_versions(const std::string& pkg) {
+    fs::path db_file = get_db_path(pkg);
+    if (!fs::exists(db_file)) return {};
+    
+    std::ifstream ifs(db_file);
+    std::string content((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
+    
+    std::vector<std::string> versions;
+    size_t rel_pos = content.find("\"releases\"");
+    if (rel_pos != std::string::npos) {
+        size_t start_brace = content.find("{", rel_pos);
+        if (start_brace != std::string::npos) {
+            // Very simple parser to find keys in the releases object
+            int balance = 1;
+            size_t cur = start_brace + 1;
+            while (cur < content.size() && balance > 0) {
+                if (content[cur] == '{') balance++;
+                else if (content[cur] == '}') balance--;
+                else if (content[cur] == '\"' && balance == 1) {
+                    size_t end_q = content.find('\"', cur + 1);
+                    if (end_q != std::string::npos) {
+                        std::string ver = content.substr(cur + 1, end_q - cur - 1);
+                        // Check if it's followed by a colon (meaning it's a key)
+                        size_t colon = content.find_first_not_of(" \t\n\r", end_q + 1);
+                        if (colon != std::string::npos && content[colon] == ':') {
+                            versions.push_back(ver);
+                        }
+                        cur = end_q;
+                    }
+                }
+                cur++;
+            }
+        }
+    }
+    return versions;
+}
+
+PackageInfo get_package_info(const std::string& pkg, const std::string& version = "") {
     fs::path db_file = get_db_path(pkg);
     if (!fs::exists(db_file)) {
         std::cout << YELLOW << "⚠️ Metadata for " << pkg << " not in local DB. Fetching..." << RESET << std::endl;
@@ -355,27 +392,28 @@ PackageInfo get_package_info(const std::string& pkg) {
     PackageInfo info;
     info.name = pkg;
     
-    // Extract version from "info" section
-    size_t info_pos = content.find("\"info\"");
-    if (info_pos != std::string::npos) {
-        size_t ver_key_pos = content.find("\"version\"", info_pos);
-        if (ver_key_pos != std::string::npos) {
-            // Find colon after "version"
-            size_t colon_pos = content.find(":", ver_key_pos);
-            if (colon_pos != std::string::npos) {
-                // Find opening quote of value
-                size_t val_start = content.find("\"", colon_pos);
-                if (val_start != std::string::npos) {
-                    // Find closing quote
-                    size_t val_end = content.find("\"", val_start + 1);
-                    if (val_end != std::string::npos) {
-                        info.version = content.substr(val_start + 1, val_end - val_start - 1);
+    if (version.empty()) {
+        // Extract version from "info" section (latest)
+        size_t info_pos = content.find("\"info\"");
+        if (info_pos != std::string::npos) {
+            size_t ver_key_pos = content.find("\"version\"", info_pos);
+            if (ver_key_pos != std::string::npos) {
+                size_t colon_pos = content.find(":", ver_key_pos);
+                if (colon_pos != std::string::npos) {
+                    size_t val_start = content.find("\"", colon_pos);
+                    if (val_start != std::string::npos) {
+                        size_t val_end = content.find("\"", val_start + 1);
+                        if (val_end != std::string::npos) {
+                            info.version = content.substr(val_start + 1, val_end - val_start - 1);
+                        }
                     }
                 }
             }
         }
+        if (info.version.empty()) info.version = extract_field(content, "version");
+    } else {
+        info.version = version;
     }
-    if (info.version.empty()) info.version = extract_field(content, "version");
 
     auto raw_deps = extract_array(content, "requires_dist");
     for (const auto& d : raw_deps) {
@@ -431,7 +469,7 @@ PackageInfo get_package_info(const std::string& pkg) {
     return info;
 }
 
-void resolve_and_install(const Config& cfg, const std::vector<std::string>& targets) {
+void resolve_and_install(const Config& cfg, const std::vector<std::string>& targets, const std::string& version = "") {
     std::vector<std::string> queue = targets;
     std::set<std::string> installed;
     std::map<std::string, PackageInfo> resolved;
@@ -445,7 +483,10 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         std::replace(lower_name.begin(), lower_name.end(), '.', '-');
         
         if (installed.count(lower_name)) continue;
-        PackageInfo info = get_package_info(name);
+        
+        // Use specific version ONLY for the first requested package if provided
+        PackageInfo info = (i == 1 && !version.empty()) ? get_package_info(name, version) : get_package_info(name);
+        
         if (info.wheel_url.empty()) {
              std::cout << RED << "❌ Could not find wheel URL for " << name << RESET << std::endl;
              continue;
@@ -981,14 +1022,119 @@ void trim_environment(const Config& cfg, const std::string& script_path) {
     }
 }
 
-uintmax_t get_dir_size(const fs::path& p) {
-    uintmax_t size = 0;
-    if (fs::exists(p) && fs::is_directory(p)) {
-        for (const auto& entry : fs::recursive_directory_iterator(p)) {
-            if (fs::is_regular_file(entry)) size += fs::file_size(entry);
-        }
+void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "") {
+    std::cout << MAGENTA << "🧪 Starting Build Server Mode (Matrix Test) for " << BOLD << pkg << RESET << std::endl;
+    
+    std::vector<std::string> versions = get_all_versions(pkg);
+    if (versions.empty()) {
+        std::cerr << RED << "❌ No versions found for " << pkg << RESET << std::endl;
+        return;
     }
-    return size;
+    
+    std::cout << BLUE << "📊 Found " << versions.size() << " versions. Testing all..." << RESET << std::endl;
+    
+    fs::path test_script = custom_test_script;
+    if (test_script.empty()) {
+        std::cout << CYAN << "🤖 Generating minimal test script using Gemini..." << RESET << std::endl;
+        fs::path gen_helper = cfg.spip_root / "scripts" / "generate_test.py";
+        // Ensure the helper is there
+        fs::path src_gen = fs::current_path() / "scripts" / "generate_test.py";
+        if (fs::exists(src_gen)) fs::copy_file(src_gen, cfg.spip_root / "scripts" / "generate_test.py", fs::copy_options::overwrite_existing);
+        
+        std::string cmd = std::format("python3 {} {}", quote_arg(gen_helper.string()), quote_arg(pkg));
+        std::string code = get_exec_output(cmd);
+        if (code.empty() || code.find("Error") != std::string::npos) {
+            std::cout << YELLOW << "⚠️ LLM generation failed or returned error. Using fallback." << RESET << std::endl;
+            code = "import " + pkg + "\nprint('Basic import successful')\n";
+        }
+        test_script = fs::current_path() / ("test_" + pkg + "_gen.py");
+        std::ofstream os(test_script);
+        os << code;
+        os.close();
+    }
+
+    struct Result { std::string version; bool install; bool pkg_tests; bool custom_test; };
+    std::vector<Result> results;
+
+    for (const auto& ver : versions) {
+        std::cout << "\n" << BOLD << BLUE << "════════════════════════════════════════════════════════════" << RESET << std::endl;
+        std::cout << BOLD << "🚀 Testing Version: " << GREEN << ver << RESET << std::endl;
+        
+        std::string branch = "matrix/" + cfg.project_hash + "/" + ver;
+        std::replace(branch.begin(), branch.end(), '.', '_');
+        
+        // Setup clean env from base
+        std::string base_branch = "base/3"; // Default to python 3
+        if (!branch_exists(cfg, base_branch)) create_base_version(cfg, "3");
+        
+        std::string br_cmd = std::format("cd {} && git branch -D {} 2>/dev/null; git branch {} {}", 
+            quote_arg(cfg.repo_path.string()), quote_arg(branch), quote_arg(branch), quote_arg(base_branch));
+        std::system(br_cmd.c_str());
+        
+        fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash + "_" + ver);
+        if (fs::exists(matrix_path)) fs::remove_all(matrix_path);
+        
+        std::string wt_cmd = std::format("cd {} && git worktree add {} {}", 
+            quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(branch));
+        std::system(wt_cmd.c_str());
+
+        Config m_cfg = cfg;
+        m_cfg.project_env_path = matrix_path;
+        
+        Result res { ver, false, false, false };
+        
+        // 1. Install
+        try {
+            resolve_and_install(m_cfg, {pkg}, ver);
+            res.install = true;
+        } catch (...) {
+            std::cout << RED << "❌ Installation failed for " << ver << RESET << std::endl;
+        }
+
+        if (res.install) {
+            // 2. Run package tests
+            std::cout << CYAN << "🧪 Running package tests..." << RESET << std::endl;
+            fs::path python_bin = matrix_path / "bin" / "python";
+            // Simple package test run
+            std::string test_cmd = std::format("{} -m pytest --version >/dev/null 2>&1", quote_arg(python_bin.string()));
+            if (std::system(test_cmd.c_str()) != 0) {
+                 std::system(std::format("{} -m pip install pytest >/dev/null 2>&1", quote_arg(python_bin.string())).c_str());
+            }
+            
+            // Try to find package dir for tests
+            fs::path sp = get_site_packages(m_cfg);
+            std::string p_name = pkg; std::transform(p_name.begin(), p_name.end(), p_name.begin(), ::tolower);
+            fs::path p_path = sp / p_name;
+            if (fs::exists(p_path)) {
+                int r = std::system(std::format("{} -m pytest {} --maxfail=1 -q", quote_arg(python_bin.string()), quote_arg(p_path.string())).c_str());
+                res.pkg_tests = (r == 0);
+            } else {
+                std::cout << YELLOW << "⚠️ Could not find package dir for tests. Skipping pkg tests." << RESET << std::endl;
+            }
+
+            // 3. Run custom/gen test
+            std::cout << CYAN << "🧪 Running custom test script..." << RESET << std::endl;
+            int r2 = std::system(std::format("{} {}", quote_arg(python_bin.string()), quote_arg(test_script.string())).c_str());
+            res.custom_test = (r2 == 0);
+        }
+
+        results.push_back(res);
+        
+        // Cleanup worktree
+        std::system(std::format("cd {} && git worktree remove --force {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string())).c_str());
+        std::system(std::format("cd {} && git branch -D {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(branch)).c_str());
+    }
+
+    std::cout << "\n" << BOLD << MAGENTA << "🏁 Matrix Test Summary for " << pkg << RESET << std::endl;
+    std::cout << std::format("{:<15} {:<10} {:<15} {:<15}", "Version", "Install", "Pkg Tests", "Custom Test") << std::endl;
+    std::cout << "------------------------------------------------------------" << std::endl;
+    for (const auto& r : results) {
+        std::cout << std::format("{:<15} {:<10} {:<15} {:<15}", 
+            r.version, 
+            (r.install ? GREEN + "PASS" : RED + "FAIL") + RESET,
+            (r.pkg_tests ? GREEN + "PASS" : YELLOW + "FAIL/SKIP") + RESET,
+            (r.custom_test ? GREEN + "PASS" : RED + "FAIL") + RESET) << std::endl;
+    }
 }
 
 struct TopPkg { std::string name; long downloads; };
@@ -1144,6 +1290,16 @@ void bundle_package(const Config& cfg, const std::string& path) {
     }
 }
 
+uintmax_t get_dir_size(const fs::path& p) {
+    uintmax_t size = 0;
+    if (fs::exists(p) && fs::is_directory(p)) {
+        for (const auto& entry : fs::recursive_directory_iterator(p)) {
+            if (fs::is_regular_file(entry)) size += fs::file_size(entry);
+        }
+    }
+    return size;
+}
+
 void show_usage_stats(const Config& cfg) {
     uintmax_t repo_size = get_dir_size(cfg.repo_path);
     uintmax_t envs_size = get_dir_size(cfg.envs_root);
@@ -1291,8 +1447,9 @@ void cleanup_spip(Config& cfg, bool remove_all = false) {
 
 void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
-        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle> [args...]" << std::endl;
+        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle|matrix> [args...]" << std::endl;
         std::cout << "  cleanup|gc [--all] - Perform maintenance, optionally remove all environments" << std::endl;
+        std::cout << "  matrix <pkg> [test.py] - Build-server mode: test all versions of a package" << std::endl;
         return;
     }
     std::string command = args[0];
@@ -1523,6 +1680,12 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         }
         setup_project_env(cfg);
         freeze_environment(cfg, args[1]);
+    }
+    else if (command == "matrix") {
+        if (!require_args(args, 2, "Usage: spip matrix <package> [test_script.py]")) return;
+        std::string pkg = args[1];
+        std::string test_script = (args.size() > 2) ? args[2] : "";
+        matrix_test(cfg, pkg, test_script);
     }
     else if (command == "list") {
         ensure_dirs(cfg);
