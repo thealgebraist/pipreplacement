@@ -15,6 +15,7 @@
 #include <regex>
 #include <set>
 #include <map>
+#include <chrono>
 
 namespace fs = std::filesystem;
 
@@ -1156,31 +1157,50 @@ void show_usage_stats(const Config& cfg) {
     std::cout << "  - Total Vault:    " << BOLD << GREEN << (total_size / (1024 * 1024)) << " MB" << RESET << std::endl;
 }
 
-void cleanup_spip(Config& cfg) {
+void cleanup_spip(Config& cfg, bool remove_all = false) {
     std::cout << MAGENTA << "🧹 Starting cleanup of .spip directory..." << RESET << std::endl;
     show_usage_stats(cfg);
 
-    // 1. Clean up orphaned environments
+    // 1. Clean up environments
     if (fs::exists(cfg.envs_root)) {
         for (const auto& entry : fs::directory_iterator(cfg.envs_root)) {
             if (entry.is_directory()) {
                 fs::path origin_file = entry.path() / ".project_origin";
-                bool should_remove = false;
+                bool should_remove = remove_all;
                 std::string project_path;
-                if (fs::exists(origin_file)) {
-                    std::ifstream ifs(origin_file);
-                    std::getline(ifs, project_path);
-                    if (!project_path.empty() && !fs::exists(project_path)) {
+                
+                if (!remove_all) {
+                    if (fs::exists(origin_file)) {
+                        std::ifstream ifs(origin_file);
+                        std::getline(ifs, project_path);
+                        if (!project_path.empty() && !fs::exists(project_path)) {
+                            should_remove = true;
+                            std::cout << YELLOW << "  - Removing orphaned environment: " << project_path << RESET << std::endl;
+                        } else {
+                            // Check if unused for 30 days
+                            auto last_write = fs::last_write_time(entry.path());
+                            auto now = std::chrono::file_clock::now();
+                            auto age = now - last_write;
+                            if (age > std::chrono::hours(24 * 30)) {
+                                should_remove = true;
+                                std::cout << YELLOW << "  - Removing unused environment (30+ days old): " << project_path << RESET << std::endl;
+                            }
+                        }
+                    } else {
+                        // No origin file - might be a broken environment
                         should_remove = true;
+                        std::cout << YELLOW << "  - Removing broken environment: " << entry.path().filename().string() << RESET << std::endl;
                     }
                 } else {
-                    // No origin file - might be a broken environment
-                    should_remove = true;
+                    if (fs::exists(origin_file)) {
+                        std::ifstream ifs(origin_file);
+                        std::getline(ifs, project_path);
+                    }
+                    std::cout << YELLOW << "  - Removing environment: " << (project_path.empty() ? entry.path().filename().string() : project_path) << RESET << std::endl;
                 }
 
                 if (should_remove) {
                     std::string hash = entry.path().filename().string();
-                    std::cout << YELLOW << "  - Removing orphaned environment: " << (project_path.empty() ? hash : project_path) << RESET << std::endl;
                     
                     // Remove worktree
                     std::string wt_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", 
@@ -1233,17 +1253,36 @@ void cleanup_spip(Config& cfg) {
         }
     }
 
-    // 3. Compact Git Repo
-    std::cout << MAGENTA << "📦 Compacting main repository (git gc)..." << RESET << std::endl;
-    std::string gc_cmd = std::format("cd {} && git gc --prune=now --aggressive", quote_arg(cfg.repo_path.string()));
-    std::system(gc_cmd.c_str());
+    // 3. Compact repositories (only if > 24h since last run)
+    fs::path last_gc_file = cfg.spip_root / ".last_gc";
+    bool run_gc = true;
+    if (fs::exists(last_gc_file)) {
+        auto last_gc_time = fs::last_write_time(last_gc_file);
+        auto now = std::chrono::file_clock::now();
+        if (now - last_gc_time < std::chrono::hours(24)) {
+            run_gc = false;
+        }
+    }
 
-    // 4. Compact DB Repo
-    fs::path db_path = cfg.spip_root / "db";
-    if (fs::exists(db_path)) {
-        std::cout << MAGENTA << "📦 Compacting database repository (git gc)..." << RESET << std::endl;
-        std::string db_gc_cmd = std::format("cd {} && git gc --prune=now --aggressive", quote_arg(db_path.string()));
-        std::system(db_gc_cmd.c_str());
+    if (run_gc) {
+        // 3. Compact Git Repo
+        std::cout << MAGENTA << "📦 Compacting main repository (git gc)..." << RESET << std::endl;
+        std::string gc_cmd = std::format("cd {} && git gc --prune=now --aggressive", quote_arg(cfg.repo_path.string()));
+        std::system(gc_cmd.c_str());
+
+        // 4. Compact DB Repo
+        fs::path db_path = cfg.spip_root / "db";
+        if (fs::exists(db_path)) {
+            std::cout << MAGENTA << "📦 Compacting database repository (git gc)..." << RESET << std::endl;
+            std::string db_gc_cmd = std::format("cd {} && git gc --prune=now --aggressive", quote_arg(db_path.string()));
+            std::system(db_gc_cmd.c_str());
+        }
+        
+        // Update last GC time
+        std::ofstream ofs(last_gc_file);
+        ofs << "Last GC run: " << std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) << std::endl;
+    } else {
+        std::cout << BLUE << "ℹ️ Skipping git gc (last run within 24 hours)." << RESET << std::endl;
     }
 
     std::cout << GREEN << "✨ Cleanup complete." << RESET << std::endl;
@@ -1253,6 +1292,7 @@ void cleanup_spip(Config& cfg) {
 void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
         std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle> [args...]" << std::endl;
+        std::cout << "  cleanup|gc [--all] - Perform maintenance, optionally remove all environments" << std::endl;
         return;
     }
     std::string command = args[0];
@@ -1492,7 +1532,8 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         std::system(cmd.c_str());
     }
     else if (command == "cleanup" || command == "gc") {
-        cleanup_spip(cfg);
+        bool remove_all = (args.size() > 1 && args[1] == "--all");
+        cleanup_spip(cfg, remove_all);
     }
 }
 

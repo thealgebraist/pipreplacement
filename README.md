@@ -18,7 +18,7 @@ A safer, version-controlled replacement for `pip` and `venv`.
 - `spip use <version>`: Switch project to a specific Python version.
 - `spip fetch-db`: Sync the local PyPI metadata vault.
 - `spip list`: Show managed environments and total disk usage of the local vault.
-- `spip gc`: Cleanup orphaned environments, temporary files, and compact repositories.
+- `spip gc [--all]`: Cleanup orphaned environments, temporary files, and compact repositories. Use --all to remove all environments.
 - `spip log`: Show environment change history.
 
 ## Design Philosophy

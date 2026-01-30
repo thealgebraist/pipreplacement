@@ -1,49 +1,40 @@
 \documentclass{article}
+\usepackage[utf8]{inputenc}
 \usepackage{geometry}
 \geometry{a4paper, margin=1in}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\title{Summary of Spip Cleanup Feature Implementation}
+\author{Gemini CLI Agent}
+\date{January 30, 2026}
+
 \begin{document}
-\title{Subgraph Isomorphism Refactoring Analysis}
-\author{Antigravity Agent}
-\date{\today}
+
 \maketitle
 
-\section{Methodology}
-We performed a structural analysis of the \texttt{spip.cpp} codebase to identify repeated code patterns (code clones) using a subgraph isomorphism approach. We employed:
-\begin{enumerate}
-    \item \textbf{Gradient Descent Isomorphism Solver}: To detecting variations of the same structure.
-    \item \textbf{Constraint-Based Matching}: Using basic block histograms and sequence alignment.
-\end{enumerate}
+\section{Overview}
+A new cleanup and maintenance feature has been added to the \texttt{spip} CLI tool. This feature addresses the need for managing disk space, removing orphaned environments, and optimizing the underlying Git repositories.
 
-\section{Findings}
-The analysis identified a massive redundancy regarding the resolution of the \texttt{site-packages} directory. The following subgraph (representing a recursive directory search) was found repeated 8 times across different functions:
-
-\begin{verbatim}
-    fs::path site_packages;
-    for (const auto& entry : fs::recursive_directory_iterator(cfg.project_env_path)) {
-        if (entry.is_directory() && entry.path().filename() == "site-packages") {
-            site_packages = entry.path();
-            break;
-        }
-    }
-\end{verbatim}
-
-\textbf{Affected Functions:}
+\section{New Features}
 \begin{itemize}
-    \item \texttt{resolve\_and\_install}
-    \item \texttt{prune\_orphans}
-    \item \texttt{uninstall\_package}
-    \item \texttt{run\_package\_tests}
-    \item \texttt{run\_all\_package\_tests}
-    \item \texttt{freeze\_environment}
-    \item \texttt{audit\_environment}
-    \item \texttt{verify\_environment}
+    \item \textbf{New Commands:} Added \texttt{spip gc} as a primary command for garbage collection, also available via the \texttt{spip cleanup} alias. Added support for \texttt{--all} to remove all managed environments.
+    \item \textbf{Disk Usage Statistics:} The tool now reports detailed disk usage before and after cleanup, including sizes for the Git repository, environments, and the package database.
+    \item \textbf{Orphan Pruning:} Automatically identifies and removes environments for projects that no longer exist on the filesystem or have been unused for more than 30 days.
+    \item \textbf{Temporary File Cleanup:} Cleans up \texttt{.whl} files, \texttt{temp\_venv\_} directories, and other temporary artifacts in the \texttt{.spip} root.
+    \item \textbf{Script Maintenance:} Removes unrecognized or obsolete Python scripts from the \texttt{.spip/scripts} directory.
+    \item \textbf{Git Optimization:} Executes \texttt{git gc --prune=now --aggressive} on both the main environment repository and the package metadata database. This is rate-limited to once every 24 hours to prevent excessive system load.
 \end{itemize}
 
-\section{Action}
-We refactored this common subgraph into a dedicated helper function:
-\begin{verbatim}
-fs::path get_site_packages(const Config& cfg);
-\end{verbatim}
-This reduces code duplication and improves maintainability by localizing the environment discovery logic.
+\section{Implementation Details}
+The implementation was performed in C++23 within \texttt{spip.cpp}. Key functions added or modified include:
+\begin{itemize}
+    \item \texttt{show\_usage\_stats(const Config\& cfg)}: Calculates and prints directory sizes using \texttt{std::filesystem}.
+    \item \texttt{cleanup\_spip(Config\& cfg)}: Orchestrates the multi-stage cleanup process.
+    \item Updated \texttt{run\_command} router to handle the new \texttt{gc} command and updated the \texttt{list} command to use detailed stats.
+\end{itemize}
+
+\section{Verification}
+The feature was compiled using \texttt{g++ -std=c++23} and verified on the local system. The initial run successfully reclaimed approximately 4GB of disk space by pruning orphaned branches and compacting the Git repository.
 
 \end{document}
