@@ -1369,17 +1369,44 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             create_base_version(cfg, target_py);
         }
 
+        if (fs::exists(matrix_path)) {
+            // Check if it's a valid git repo or stale worktree
+            std::string check_cmd = std::format("cd {} && git status >/dev/null 2>&1", quote_arg(matrix_path.string()));
+            if (std::system(check_cmd.c_str()) != 0) {
+                 std::cout << YELLOW << "⚠️ Stale worktree detected. Cleaning up..." << RESET << std::endl;
+                 fs::remove_all(matrix_path);
+                 std::string prune_cmd = std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string()));
+                 std::system(prune_cmd.c_str());
+            }
+        }
+
         if (!fs::exists(matrix_path)) {
             // Create worktree with a detached HEAD to avoid "already used" errors
             std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
                 quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
-            std::system(wt_cmd.c_str());
+            int ret = std::system(wt_cmd.c_str());
+            if (ret != 0) {
+                // If adding fails, try pruning and force removing
+                 std::string prune_cmd = std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string()));
+                 std::system(prune_cmd.c_str());
+                 if (fs::exists(matrix_path)) fs::remove_all(matrix_path);
+                 std::system(wt_cmd.c_str());
+            }
         } else {
             // Optimized refresh: only reset files and remove untracked site-packages
             // Full 'clean -fdx' is slow because it scans everything.
             std::string reset_cmd = std::format("cd {} && git checkout --detach {} && git reset --hard {} && git clean -fd site-packages 2>/dev/null", 
                 quote_arg(matrix_path.string()), quote_arg(base_branch), quote_arg(base_branch));
-            std::system(reset_cmd.c_str());
+            if (std::system(reset_cmd.c_str()) != 0) {
+                // If reset fails, standard recovery: nuke and recreate
+                 std::cout << YELLOW << "⚠️ Worktree reset failed. Recreating..." << RESET << std::endl;
+                 fs::remove_all(matrix_path);
+                 std::string prune_cmd = std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string()));
+                 std::system(prune_cmd.c_str());
+                 std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
+                    quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
+                 std::system(wt_cmd.c_str());
+            }
         }
 
         Config m_cfg = cfg;
@@ -1429,68 +1456,77 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             fs::path sp = get_site_packages(m_cfg);
             std::string p_name = pkg; std::transform(p_name.begin(), p_name.end(), p_name.begin(), ::tolower);
             fs::path p_path = sp / p_name;
-            if (fs::exists(p_path)) {
-                // Run pytest and capture output to detect missing dependencies
-                std::string pytest_cmd = std::format("{} -m pytest {} --maxfail=1 -q", quote_arg(python_bin.string()), quote_arg(p_path.string()));
-                std::string test_out = get_exec_output(pytest_cmd);
-                
-                // Check if failed due to missing dependency
-                bool missing_dep = false;
-                std::string missing_pkg = "";
-                
-                // Regex for "ImportError: <pkg> is a required dependency"
-                std::regex import_err_re(R"(ImportError: ([a-zA-Z0-9_\-]+) is a required dependency)");
-                std::regex mod_err_re(R"(ModuleNotFoundError: No module named '?([a-zA-Z0-9_\-]+)'?)");
-                std::smatch m;
-                
-                if (std::regex_search(test_out, m, import_err_re)) {
-                    missing_pkg = m[1].str();
-                    missing_dep = true;
-                } else if (std::regex_search(test_out, m, mod_err_re)) {
-                     missing_pkg = m[1].str();
-                     // Filter out internal modules (often contain dots)
-                     if (missing_pkg.find('.') == std::string::npos && missing_pkg != p_name) {
-                         missing_dep = true;
+
+             // REWRITE ENTIRE BLOCK WITH CLEAN LOOP
+             if (fs::exists(p_path)) {
+                 std::string pytest_flags = "--maxfail=1 -q";
+                 bool success = false;
+                 
+                 for (int attempt = 0; attempt < 3; ++attempt) {
+                }
+             } else {
+                 std::cout << YELLOW << "⚠️ Could not find package dir for tests. Skipping pkg tests." << RESET << std::endl;
+             }
+             
+             // REWRITE ENTIRE BLOCK WITH CLEAN LOOP
+             if (fs::exists(p_path)) {
+                 std::string pytest_flags = "--maxfail=1 -q";
+                 bool success = false;
+                 
+                 for (int attempt = 0; attempt < 3; ++attempt) {
+                     std::string pytest_cmd = std::format("{} -m pytest {} {}", quote_arg(python_bin.string()), quote_arg(p_path.string()), pytest_flags);
+                     std::string test_out = get_exec_output(pytest_cmd + " 2>&1"); // Ensure we capture everything
+                     
+                     // Helper lambda to run clean sys for final result check
+                     auto run_final = [&]() {
+                         return std::system(pytest_cmd.c_str()) == 0;
+                     };
+
+                     // Regexes
+                     std::regex import_err_re(R"(ImportError: ([a-zA-Z0-9_\-]+) is a required dependency)");
+                     std::regex mod_err_re(R"(ModuleNotFoundError: No module named '?([a-zA-Z0-9_\-]+)'?)");
+                     std::regex rel_import_re(R"(ImportError: attempted relative import with no known parent package)");
+                     std::smatch m;
+
+                     bool action_taken = false;
+
+                     if (std::regex_search(test_out, m, import_err_re) || std::regex_search(test_out, m, mod_err_re)) {
+                         std::string missing_pkg = m[1].str();
+                         
+                         if (missing_pkg == "distutils") missing_pkg = "setuptools";
+                         if (missing_pkg == "path") missing_pkg = "path.py"; // Common confusion, or 'jaraco.path' ? 'path' usually refers to 'path.py' on PyPI or just 'path'
+
+                         if (missing_pkg.find('.') == std::string::npos && missing_pkg != p_name) {
+                             std::cout << YELLOW << "⚠️ Missing test dependency: " << missing_pkg << ". Installing..." << RESET << std::endl;
+                             try {
+                                 resolve_and_install(m_cfg, {missing_pkg});
+                                 action_taken = true;
+                             } catch (...) {
+                                 std::cout << RED << "❌ Failed to install " << missing_pkg << RESET << std::endl;
+                             }
+                         }
+                     } 
+                     
+                     if (!action_taken && std::regex_search(test_out, m, rel_import_re)) {
+                          if (pytest_flags.find("--import-mode=importlib") == std::string::npos) {
+                              std::cout << YELLOW << "⚠️ Relative import error. Adding --import-mode=importlib..." << RESET << std::endl;
+                              pytest_flags += " --import-mode=importlib";
+                              action_taken = true;
+                          }
                      }
-                }
-                
-                if (missing_dep && !missing_pkg.empty()) {
-                    std::cout << YELLOW << "⚠️ Missing test dependency detected: " << missing_pkg << ". Installing..." << RESET << std::endl;
-                    try {
-                        resolve_and_install(m_cfg, {missing_pkg});
-                        // Retry test
-                        std::cout << CYAN << "🔄 Retrying package tests..." << RESET << std::endl;
-                        test_out = get_exec_output(pytest_cmd);
-                    } catch (...) {
-                         std::cout << RED << "❌ Failed to install missing test dependency: " << missing_pkg << RESET << std::endl;
-                    }
-                }
-                
-                // Determine success based on exit code or output content (since get_exec_output hides exit code)
-                // get_exec_output returns stdout+stderr. pytest usually prints "ignored" or "failed" or "passed".
-                // However, without exit code, it's hard. 
-                // Let's use std::system for the *final* check/result to respect exit codes, 
-                // but use test_out for the first check.
-                // Or better: check if test_out contains "failed" or "error" if we can't reliably get exit code from popen efficiently.
-                // Actually, the simplest is to just run std::system again if we retried.
-                
-                if (missing_dep) {
-                     int r = std::system(pytest_cmd.c_str());
-                     res.pkg_tests = (r == 0);
-                } else {
-                     // Check if the FIRST run contained failures. 
-                     // Since get_exec_output swallows exit code, we have to rely on string parsing OR re-run.
-                     // The previous code used std::system. 
-                     // Let's execute std::system one more time if not missing_dep, to be consistent with exit codes.
-                     // It's a bit duplicate but safe.
-                     // A better way: check if test_out has content typical of success? No, too fragile.
-                     int r = std::system(pytest_cmd.c_str());
-                     res.pkg_tests = (r == 0);
-                }
-                
-            } else {
-                std::cout << YELLOW << "⚠️ Could not find package dir for tests. Skipping pkg tests." << RESET << std::endl;
-            }
+
+                     if (!action_taken) {
+                         // No recoverable error found, or tests passed/failed on other grounds
+                         // Run standard system for result
+                         success = run_final();
+                         break;
+                     } 
+                     // If action taken, loop continues to retry
+                 }
+                 res.pkg_tests = success;
+             } else {
+                 std::cout << YELLOW << "⚠️ Could not find package dir for tests. Skipping pkg tests." << RESET << std::endl;
+             }
 
             // 3. Run custom/gen test
             std::cout << CYAN << "🧪 Running custom test script..." << RESET << std::endl;
