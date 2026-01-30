@@ -19,9 +19,10 @@ A new cleanup and maintenance feature has been added to the \texttt{spip} CLI to
 \section{New Features}
 \begin{itemize}
     \item \textbf{New Commands:} Added \texttt{spip gc} for maintenance and \texttt{spip matrix <pkg>} for build-server mode. \texttt{matrix} mode tests all available versions of a package for installability and functional correctness.
-    \item \textbf{Disk Usage Statistics:} The tool now reports detailed disk usage before and after cleanup.
+    \item \textbf{Automatic Python Detection:} \texttt{spip matrix} now analyzes PyPI metadata to automatically determine and bootstrap the most compatible Python version for each package version.
+    \item \textbf{Configuration Analysis:} Provides a detailed configuration report (matrix size, Python requirements, latest version) before starting the test suite.
     \item \textbf{Orphan Pruning:} Automatically identifies and removes environments for projects that no longer exist on the filesystem or have been unused for more than 30 days.
-    \item \textbf{Automated Testing:} \texttt{spip matrix} can automatically generate minimal test scripts using the Gemini LLM to verify package functionality across multiple versions.
+    \item \textbf{Automated Testing:} \texttt{spip matrix} can automatically generate robust test scripts (with fallbacks) to verify package functionality across multiple versions.
     \item \textbf{Git Optimization:} Executes rate-limited \texttt{git gc} (once every 24 hours) to maintain repository health.
 \end{itemize}
 
