@@ -1143,9 +1143,116 @@ void bundle_package(const Config& cfg, const std::string& path) {
     }
 }
 
+void show_usage_stats(const Config& cfg) {
+    uintmax_t repo_size = get_dir_size(cfg.repo_path);
+    uintmax_t envs_size = get_dir_size(cfg.envs_root);
+    uintmax_t db_size = get_dir_size(cfg.spip_root / "db");
+    uintmax_t total_size = get_dir_size(cfg.spip_root);
+
+    std::cout << BOLD << "📊 Disk Usage Statistics:" << RESET << std::endl;
+    std::cout << "  - Git Repository: " << CYAN << (repo_size / (1024 * 1024)) << " MB" << RESET << std::endl;
+    std::cout << "  - Environments:   " << CYAN << (envs_size / (1024 * 1024)) << " MB" << RESET << std::endl;
+    std::cout << "  - Package DB:     " << CYAN << (db_size / (1024 * 1024)) << " MB" << RESET << std::endl;
+    std::cout << "  - Total Vault:    " << BOLD << GREEN << (total_size / (1024 * 1024)) << " MB" << RESET << std::endl;
+}
+
+void cleanup_spip(Config& cfg) {
+    std::cout << MAGENTA << "🧹 Starting cleanup of .spip directory..." << RESET << std::endl;
+    show_usage_stats(cfg);
+
+    // 1. Clean up orphaned environments
+    if (fs::exists(cfg.envs_root)) {
+        for (const auto& entry : fs::directory_iterator(cfg.envs_root)) {
+            if (entry.is_directory()) {
+                fs::path origin_file = entry.path() / ".project_origin";
+                bool should_remove = false;
+                std::string project_path;
+                if (fs::exists(origin_file)) {
+                    std::ifstream ifs(origin_file);
+                    std::getline(ifs, project_path);
+                    if (!project_path.empty() && !fs::exists(project_path)) {
+                        should_remove = true;
+                    }
+                } else {
+                    // No origin file - might be a broken environment
+                    should_remove = true;
+                }
+
+                if (should_remove) {
+                    std::string hash = entry.path().filename().string();
+                    std::cout << YELLOW << "  - Removing orphaned environment: " << (project_path.empty() ? hash : project_path) << RESET << std::endl;
+                    
+                    // Remove worktree
+                    std::string wt_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", 
+                        quote_arg(cfg.repo_path.string()), quote_arg(entry.path().string()));
+                    std::system(wt_cmd.c_str());
+
+                    // Remove branch
+                    std::string br_cmd = std::format("cd {} && git branch -D project/{} 2>/dev/null", 
+                        quote_arg(cfg.repo_path.string()), quote_arg(hash));
+                    std::system(br_cmd.c_str());
+
+                    // Ensure directory is gone
+                    if (fs::exists(entry.path())) {
+                        fs::remove_all(entry.path());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Remove temporary files and unrecognized scripts
+    std::cout << MAGENTA << "🗑 Removing temporary files and caches..." << RESET << std::endl;
+    if (fs::exists(cfg.spip_root)) {
+        for (const auto& entry : fs::directory_iterator(cfg.spip_root)) {
+            std::string name = entry.path().filename().string();
+            if (name.starts_with("temp_venv_")) {
+                std::cout << YELLOW << "  - Removing " << name << RESET << std::endl;
+                fs::remove_all(entry.path());
+            } else if (entry.is_regular_file()) {
+                if (name.ends_with(".whl") || name.ends_with(".tmp") || name.ends_with(".py")) {
+                    std::cout << YELLOW << "  - Removing " << name << RESET << std::endl;
+                    fs::remove(entry.path());
+                }
+            }
+        }
+    }
+
+    fs::path scripts_dir = cfg.spip_root / "scripts";
+    if (fs::exists(scripts_dir)) {
+        std::set<std::string> recognized_scripts = {
+            "safe_extract.py", "audit_helper.py", "review_helper.py", 
+            "verify_helper.py", "trim_helper.py", "agent_helper.py"
+        };
+        for (const auto& entry : fs::directory_iterator(scripts_dir)) {
+            std::string name = entry.path().filename().string();
+            if (recognized_scripts.find(name) == recognized_scripts.end()) {
+                std::cout << YELLOW << "  - Removing unrecognized script: " << name << RESET << std::endl;
+                fs::remove_all(entry.path());
+            }
+        }
+    }
+
+    // 3. Compact Git Repo
+    std::cout << MAGENTA << "📦 Compacting main repository (git gc)..." << RESET << std::endl;
+    std::string gc_cmd = std::format("cd {} && git gc --prune=now --aggressive", quote_arg(cfg.repo_path.string()));
+    std::system(gc_cmd.c_str());
+
+    // 4. Compact DB Repo
+    fs::path db_path = cfg.spip_root / "db";
+    if (fs::exists(db_path)) {
+        std::cout << MAGENTA << "📦 Compacting database repository (git gc)..." << RESET << std::endl;
+        std::string db_gc_cmd = std::format("cd {} && git gc --prune=now --aggressive", quote_arg(db_path.string()));
+        std::system(db_gc_cmd.c_str());
+    }
+
+    std::cout << GREEN << "✨ Cleanup complete." << RESET << std::endl;
+    show_usage_stats(cfg);
+}
+
 void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
-        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle> [args...]" << std::endl;
+        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle> [args...]" << std::endl;
         return;
     }
     std::string command = args[0];
@@ -1379,11 +1486,13 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
     }
     else if (command == "list") {
         ensure_dirs(cfg);
-        uintmax_t total_size = get_dir_size(cfg.spip_root);
-        std::cout << BOLD << "Vault Usage: " << CYAN << (total_size / (1024 * 1024)) << " MB" << RESET << std::endl;
+        show_usage_stats(cfg);
         std::cout << BOLD << "Managed Environment Branches:" << RESET << std::endl;
         std::string cmd = std::format("cd \"{}\" && git branch", cfg.repo_path.string());
         std::system(cmd.c_str());
+    }
+    else if (command == "cleanup" || command == "gc") {
+        cleanup_spip(cfg);
     }
 }
 
