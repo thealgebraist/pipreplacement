@@ -116,7 +116,9 @@ std::string quote_arg(const std::string& arg) {
 std::string get_exec_output(const std::string& cmd) {
     std::string result;
     char buffer[128];
-    FILE* pipe = popen(cmd.c_str(), "r");
+    // Capture stderr by redirecting it to stdout
+    std::string full_cmd = cmd + " 2>&1";
+    FILE* pipe = popen(full_cmd.c_str(), "r");
     if (!pipe) return "";
     while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
         result += buffer;
@@ -1174,7 +1176,7 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
     std::cout << std::endl << GREEN << "✔️  Parallel download complete." << RESET << std::endl;
 }
 
-void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto", bool profile = false, bool no_cleanup = false) {
+void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto", bool profile = false, bool no_cleanup = false, int revision_limit = -1, bool test_all_revisions = false) {
     std::cout << MAGENTA << "🧪 Starting Build Server Mode (Matrix Test) for " << BOLD << pkg << RESET << std::endl;
     if (profile) std::cout << YELLOW << "📊 Profiling mode enabled." << RESET << std::endl;
     
@@ -1258,6 +1260,10 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
     struct Result { std::string version; bool install; bool pkg_tests; bool custom_test; ResourceUsage stats; };
     std::vector<Result> results;
+    
+    // For AI summarization
+    struct ErrorLog { std::string version; std::string python; std::string output; };
+    std::vector<ErrorLog> error_logs;
 
     for (const auto& ver : versions) {
         std::cout << "\n" << BOLD << BLUE << "════════════════════════════════════════════════════════════" << RESET << std::endl;
@@ -1332,8 +1338,16 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
             // 3. Run custom/gen test
             std::cout << CYAN << "🧪 Running custom test script..." << RESET << std::endl;
-            int r2 = std::system(std::format("{} {}", quote_arg(python_bin.string()), quote_arg(test_script.string())).c_str());
-            res.custom_test = (r2 == 0);
+            std::string run_custom = std::format("{} {}", quote_arg(python_bin.string()), quote_arg(test_script.string()));
+            std::string custom_out = get_exec_output(run_custom);
+            std::cout << custom_out << (custom_out.empty() ? "" : "\n");
+            
+            if (custom_out.find("Traceback") != std::string::npos || custom_out.find("Error:") != std::string::npos) {
+                res.custom_test = false;
+                error_logs.push_back({ver, target_py, custom_out});
+            } else {
+                res.custom_test = true;
+            }
         }
 
         if (profile && v_prof) {
@@ -1353,6 +1367,40 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         }
     } else {
         std::cout << BLUE << "ℹ️ Skipping final cleanup (reusable worktree preserved)." << RESET << std::endl;
+    }
+
+    // AI Summarization Phase
+    const char* api_key = std::getenv("GEMINI_API_KEY");
+    if (api_key && !error_logs.empty()) {
+        std::cout << MAGENTA << "🤖 Asking AI to summarize the failures..." << RESET << std::endl;
+        fs::path log_json = cfg.spip_root / "matrix_errors.json";
+        std::ofstream ofs(log_json);
+        ofs << "[\n";
+        for (size_t i = 0; i < error_logs.size(); ++i) {
+            ofs << "  {\n";
+            ofs << "    \"version\": \"" << error_logs[i].version << "\",\n";
+            ofs << "    \"python\": \"" << error_logs[i].python << "\",\n";
+            // Escape quotes and newlines for JSON
+            std::string escaped = "";
+            for (char c : error_logs[i].output) {
+                if (c == '\"') escaped += "\\\"";
+                else if (c == '\n') escaped += "\\n";
+                else if (c == '\\') escaped += "\\\\";
+                else if (c < 32) {} // Skip other control chars
+                else escaped += c;
+            }
+            ofs << "    \"output\": \"" << escaped << "\"\n";
+            ofs << "  }" << (i == error_logs.size() - 1 ? "" : ",") << "\n";
+        }
+        ofs << "]";
+        ofs.close();
+
+        fs::path summary_script = cfg.spip_root / "scripts" / "summarize_errors.py";
+        // Ensure the script is in spip_root
+        fs::path src_sum = fs::current_path() / "scripts" / "summarize_errors.py";
+        if (fs::exists(src_sum)) fs::copy_file(src_sum, summary_script, fs::copy_options::overwrite_existing);
+
+        std::system(std::format("python3 {} {}", quote_arg(summary_script.string()), quote_arg(log_json.string())).c_str());
     }
 
     std::cout << "\n" << BOLD << MAGENTA << "🏁 Matrix Test Summary for " << pkg << RESET << std::endl;
