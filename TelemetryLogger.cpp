@@ -1,7 +1,7 @@
 #include "TelemetryLogger.h"
 
-TelemetryLogger::TelemetryLogger(const Config& c, const std::string& id) 
-    : cfg(c), test_id(id), last_user_vec(MAX_CORES, 0), last_sys_vec(MAX_CORES, 0), last_io_vec(MAX_CORES, 0) 
+TelemetryLogger::TelemetryLogger(const Config& c, const std::string& id)
+    : cfg(c), test_id(id), last_user_vec(MAX_CORES, 0), last_sys_vec(MAX_CORES, 0), last_io_vec(MAX_CORES, 0)
 {
     fs::path db_dir = cfg.spip_root / "telemetry";
     std::error_code ec;
