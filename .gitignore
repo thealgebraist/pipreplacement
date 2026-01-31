@@ -15,3 +15,4 @@ stress_64_log.txt
 *.log
 *.out
 *.aux
+.ninja_lock

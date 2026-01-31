@@ -291,6 +291,57 @@ private:
             log_to_db(ts, -2, 0, 0, 0, (long)ibytes, (long)obytes, 0, 0, 0);
             freeifaddrs(ifa_list);
         }
+        #elif defined(__linux__)
+        // CPU (/proc/stat)
+        std::ifstream stat("/proc/stat");
+        std::string line;
+        static std::vector<uint64_t> last_total(512, 0), last_user_lnx(512, 0), last_sys_lnx(512, 0);
+        while (std::getline(stat, line) && line.starts_with("cpu")) {
+            if (line.starts_with("cpu ")) continue; // Skip aggregate
+            std::stringstream ss(line);
+            std::string cpu_label; ss >> cpu_label;
+            int core_id = std::stoi(cpu_label.substr(3));
+            if (core_id >= 512) break;
+
+            uint64_t u, n, s, id, io, irq, soft;
+            ss >> u >> n >> s >> id >> io >> irq >> soft;
+            
+            uint64_t cur_user = u + n;
+            uint64_t cur_sys = s + irq + soft;
+            
+            double du = (cur_user > last_user_lnx[core_id]) ? (double)(cur_user - last_user_lnx[core_id]) : 0;
+            double ds = (cur_sys > last_sys_lnx[core_id]) ? (double)(cur_sys - last_sys_lnx[core_id]) : 0;
+            
+            last_user_lnx[core_id] = cur_user;
+            last_sys_lnx[core_id] = cur_sys;
+            
+            log_to_db(ts, core_id, du, ds, 0, 0, 0, 0, 0, (double)io);
+        }
+
+        // Memory (/proc/meminfo)
+        std::ifstream meminfo("/proc/meminfo");
+        long total = 0, free = 0, cached = 0, buffers = 0;
+        while (std::getline(meminfo, line)) {
+            if (line.starts_with("MemTotal:")) total = std::stol(line.substr(10));
+            else if (line.starts_with("MemFree:")) free = std::stol(line.substr(10));
+            else if (line.starts_with("Cached:")) cached = std::stol(line.substr(10));
+            else if (line.starts_with("Buffers:")) buffers = std::stol(line.substr(10));
+        }
+        log_to_db(ts, -1, 0, 0, total - free - cached - buffers, 0, 0, 0, 0, 0);
+
+        // Network (/proc/net/dev)
+        std::ifstream netdev("/proc/net/dev");
+        uint64_t rb = 0, tb = 0;
+        std::getline(netdev, line); std::getline(netdev, line); // Skip headers
+        while (std::getline(netdev, line)) {
+            size_t colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::stringstream ss(line.substr(colon + 1));
+            uint64_t r, dummy;
+            ss >> r >> dummy >> dummy >> dummy >> dummy >> dummy >> dummy >> dummy >> dummy;
+            rb += r; ss >> r; tb += r;
+        }
+        log_to_db(ts, -2, 0, 0, 0, (long)rb, (long)tb, 0, 0, 0);
         #endif
     }
 
@@ -3340,6 +3391,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         std::string test_script = "";
         std::string python_ver = "auto";
         bool profile = false;
+        bool telemetry = false;
         bool no_cleanup = false;
         int revision_limit = -1;
         bool test_all_revisions = false;
@@ -3351,6 +3403,8 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
                 python_ver = args[++i];
             } else if (arg == "--profile") {
                 profile = true;
+            } else if (arg == "--telemetry") {
+                telemetry = true;
             } else if (arg == "--no-cleanup") {
                 no_cleanup = true;
             } else if (arg == "--limit" && i + 1 < args.size()) {
@@ -3370,7 +3424,9 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
             return;
         }
         
-        matrix_test(cfg, pkg, test_script, python_ver, profile, no_cleanup, revision_limit, test_all_revisions, false);
+        Config m_cfg = cfg;
+        m_cfg.telemetry = telemetry;
+        matrix_test(m_cfg, pkg, test_script, python_ver, profile, no_cleanup, revision_limit, test_all_revisions, false);
     }
     else if (command == "compat") {
         ensure_dirs(cfg);
