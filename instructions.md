@@ -57,6 +57,7 @@
     - [x] Replaced global download locks with granular per-wheel mutexes for 100% parallel dependency resolution.
     - [x] Implemented a `std::counting_semaphore` for Git operations to allow safely overlapping worktree creation (8 concurrent ops).
 - [x] **Orchestration Benchmark (`spip bench`)**: A dedicated pre-flight tool to verify thread scheduling Efficiency and telemetry mapping on high-density servers.
+    - [x] **Network Stress Test (`--network`)**: Benchmarks multiple mirror nodes (PyPI, Tsinghua, USTC, Aliyun, Baidu) and calculates optimal download concurrency using a strict 4s-per-op quota.
 - [x] **Smoke Test Flag (`--smoke`)**: Added to `matrix` and `compat` to validate the parallel execution engine before initiating long-running test suites.
 - [x] **Stall Prevention & Hardened I/O**: 
     - [x] Integrated `timeout` and `curl` reachability flags to prevent dead connections from hanging the parallel downloader.

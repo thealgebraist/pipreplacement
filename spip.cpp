@@ -750,26 +750,30 @@ bool require_args(const std::vector<std::string>& args, size_t min_count, const 
 
 void benchmark_mirrors(Config& cfg) {
     std::cout << MAGENTA << "🏎  Benchmarking mirrors to find the fastest..." << RESET << std::endl;
-    std::vector<std::string> mirrors = {
-        "https://pypi.org",
-        "https://pypi.tuna.tsinghua.edu.cn"
+    std::vector<std::pair<std::string, std::string>> mirrors = {
+        {"PyPI Official", "https://pypi.org"},
+        {"Tsinghua", "https://pypi.tuna.tsinghua.edu.cn"},
+        {"USTC", "https://pypi.mirrors.ustc.edu.cn"},
+        {"Baidu", "https://mirror.baidu.com/pypi"},
+        {"Aliyun", "https://mirrors.aliyun.com/pypi"}
     };
     
-    std::string best_mirror = mirrors[0];
+    std::string best_mirror = "https://pypi.org";
     double min_time = 9999.0;
 
-    for (const auto& m : mirrors) {
-        std::string cmd = std::format("curl -o /dev/null -s -w \"%{{time_total}}\" -m 2 \"{}/pypi/pip/json\"", m);
+    for (const auto& [name, url] : mirrors) {
+        // Strict 4s timeout as per user rule 0
+        std::string cmd = std::format("timeout -s 9 4s curl -o /dev/null -s -w \"%{{time_total}}\" -m 3 \"{}/pypi/pip/json\"", url);
         std::string out = get_exec_output(cmd);
         try {
             double t = std::stod(out);
-            if (t < min_time) {
+            if (t > 0 && t < min_time) {
                 min_time = t;
-                best_mirror = m;
+                best_mirror = url;
             }
-            std::cout << "  - " << m << ": " << GREEN << t << "s" << RESET << std::endl;
+            std::cout << "  - [" << name << "] " << url << ": " << GREEN << t << "s" << RESET << std::endl;
         } catch (...) {
-            std::cout << "  - " << m << ": " << RED << "Timeout/Error" << RESET << std::endl;
+            std::cout << "  - [" << name << "] " << url << ": " << RED << "Timeout/Error" << RESET << std::endl;
         }
     }
     cfg.pypi_mirror = best_mirror;
@@ -1687,9 +1691,11 @@ std::map<std::string, PackageInfo> resolve_only(const std::vector<std::string>& 
 int benchmark_concurrency(const Config& cfg) {
     std::cout << MAGENTA << "🔍 Benchmarking network for optimal download concurrency..." << RESET << std::endl;
     std::vector<int> tests = {1, 4, 8, 16, 32};
+    // Use a small constant wheel for benchmarking
     std::string test_url = "https://files.pythonhosted.org/packages/ef/b5/b4b38202d659a11ff928174ad4ec0725287f3b89b88f343513a8dd645d94/idna-3.7-py3-none-any.whl";
-    fs::path tmp = cfg.spip_root / "bench.whl";
+    // If mirror is set, try to derive files URL or stick to PyPI for consistency if it's just for thread count calibration
     
+    fs::path tmp = cfg.spip_root / "bench.whl";
     int best_c = 4;
     double min_time = 1e9;
 
@@ -1700,23 +1706,25 @@ int benchmark_concurrency(const Config& cfg) {
         std::vector<std::thread> workers;
         for (int i = 0; i < c; ++i) {
             workers.emplace_back([&, i]() {
-                std::string cmd = std::format("timeout 30 curl -L --connect-timeout 5 --max-time 20 -s {} -o {}_{}", test_url, tmp.string(), i);
+                // Strict 4s timeout as per rule 0
+                std::string cmd = std::format("timeout -s 9 4s curl -L -s {} -o {}_{}", test_url, tmp.string(), i);
                 std::system(cmd.c_str());
             });
         }
         for (auto& t : workers) t.join();
         auto end = std::chrono::steady_clock::now();
         double d = std::chrono::duration<double>(end - start).count();
-        std::cout << "  - " << c << " threads: " << YELLOW << d << "s" << RESET << std::endl;
+        std::cout << "  - " << std::format("{:2d}", c) << " threads: " << YELLOW << std::format("{:.4f}s", d) << RESET << std::endl;
         
-        if (d < min_time) {
+        if (d > 0 && d < min_time) {
             min_time = d;
             best_c = c;
         }
         // Cleanup
         for (int i = 0; i < c; ++i) {
             fs::path p = std::format("{}_{}", tmp.string(), i);
-            if (fs::exists(p)) fs::remove(p);
+            std::error_code ec;
+            if (fs::exists(p, ec)) fs::remove(p, ec);
         }
     }
     std::cout << GREEN << "✨ Optimized download concurrency: " << best_c << RESET << std::endl;
@@ -3606,17 +3614,26 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
     else if (command == "bench") {
         int threads = cfg.concurrency;
         bool telemetry = false;
+        bool network = false;
         for (size_t i = 1; i < args.size(); ++i) {
             if ((args[i] == "--threads" || args[i] == "-j") && i + 1 < args.size()) {
                 threads = std::stoi(args[++i]);
             } else if (args[i] == "--telemetry") {
                 telemetry = true;
+            } else if (args[i] == "--network") {
+                network = true;
             }
         }
         Config b_cfg = cfg;
         b_cfg.concurrency = threads;
         b_cfg.telemetry = telemetry;
-        run_thread_test(b_cfg);
+        
+        if (network) {
+            benchmark_mirrors(b_cfg);
+            benchmark_concurrency(b_cfg);
+        } else {
+            run_thread_test(b_cfg);
+        }
     }
     else if (command == "list") {
         ensure_dirs(cfg);
