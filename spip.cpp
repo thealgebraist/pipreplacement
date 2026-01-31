@@ -1084,7 +1084,7 @@ PackageInfo get_package_info(const std::string& pkg, const std::string& version 
     return info;
 }
 
-void resolve_and_install(const Config& cfg, const std::vector<std::string>& targets, const std::string& version = "", const std::string& target_py = "3.12") {
+bool resolve_and_install(const Config& cfg, const std::vector<std::string>& targets, const std::string& version = "", const std::string& target_py = "3.12") {
     std::vector<std::string> queue = targets;
     std::set<std::string> installed;
     std::map<std::string, PackageInfo> resolved;
@@ -1113,30 +1113,41 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
     fs::path site_packages = get_site_packages(cfg);
     if (site_packages.empty()) {
         std::cerr << RED << "❌ Could not find site-packages directory." << RESET << std::endl;
-        return;
+        return false;
     }
     std::cout << GREEN << "🚀 Installing " << resolved.size() << " packages..." << RESET << std::endl;
     int current = 0;
-    for (const auto& [name, info] : resolved) {
+    bool all_ok = true;
+    for (const auto& [id, info] : resolved) {
         // Check if already installed
-        // Simple heuristic: check for .dist-info directory
-        // Note: Package names in dist-info are usually lowercased or underscored.
-        std::string safe_name = name;
-        std::replace(safe_name.begin(), safe_name.end(), '-', '_');
-        fs::path dist_info = site_packages / (safe_name + "-" + info.version + ".dist-info");
+        // Robust check: lowercase and normalize name
+        std::string norm_name = info.name;
+        std::transform(norm_name.begin(), norm_name.end(), norm_name.begin(), ::tolower);
+        std::replace(norm_name.begin(), norm_name.end(), '-', '_');
         
-        // Also check for just the package directory as a fallback/fast-check
-        fs::path pkg_dir = site_packages / name;
-        if (fs::exists(dist_info)) {
-             std::cout << GREEN << "✔ " << name << " " << info.version << " already installed." << RESET << std::endl;
+        bool already_installed = false;
+        for (const auto& entry : fs::directory_iterator(site_packages)) {
+            std::string entry_name = entry.path().filename().string();
+            std::transform(entry_name.begin(), entry_name.end(), entry_name.begin(), ::tolower);
+            std::string norm_entry = entry_name;
+            std::replace(norm_entry.begin(), norm_entry.end(), '-', '_');
+            
+            if (norm_entry == norm_name || (norm_entry.find(norm_name + "-") == 0 && norm_entry.find(".dist-info") != std::string::npos)) {
+                already_installed = true;
+                break;
+            }
+        }
+
+        if (already_installed) {
+             std::cout << GREEN << "✔ " << info.name << " " << info.version << " already installed." << RESET << std::endl;
              continue;
         }
 
         current++;
         std::cout << BLUE << "[" << current << "/" << resolved.size() << "] " << RESET 
-                  << "📦 " << BOLD << name << RESET << " (" << info.version << ")..." << std::endl;
+                  << "📦 " << BOLD << info.name << RESET << " (" << info.version << ")..." << std::endl;
         
-        fs::path temp_wheel = cfg.spip_root / (name + "-" + info.version + ".whl");
+        fs::path temp_wheel = cfg.spip_root / (info.name + "-" + info.version + ".whl");
         if (!fs::exists(temp_wheel) || fs::file_size(temp_wheel) == 0) {
             // Per-wheel lock to allow parallel downloads of different packages
             static std::mutex m_registry;
@@ -1178,7 +1189,7 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         int ret = run_shell(extract_cmd.c_str());
         
         if (ret != 0) {
-            std::cerr << YELLOW << "⚠️ Extraction failed for " << name << ". Wheel might be corrupt. Deleting and retrying hardened download..." << RESET << std::endl;
+            std::cerr << YELLOW << "⚠️ Extraction failed for " << info.name << ". Wheel might be corrupt. Deleting and retrying hardened download..." << RESET << std::endl;
             if (fs::exists(temp_wheel)) fs::remove(temp_wheel);
             
             // Retry hardened download once
@@ -1190,11 +1201,13 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
             }
             
             if (ret != 0) {
-                std::cerr << RED << "❌ Installation failed for " << name << ". (Bad wheel or extraction error after retry)" << RESET << std::endl;
+                std::cerr << RED << "❌ Installation failed for " << info.name << ". (Bad wheel or extraction error after retry)" << RESET << std::endl;
                 if (fs::exists(temp_wheel)) fs::remove(temp_wheel); 
+                all_ok = false;
             }
         }
     }
+    return all_ok;
 }
 
 // Forward declarations
@@ -2275,7 +2288,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         
         // 1. Install main package and its dependencies
         try {
-            resolve_and_install(m_cfg, {pkg}, vary_python ? "" : ver, target_py); // Installs pkg and its runtime deps
+            bool install_ok = resolve_and_install(m_cfg, {pkg}, vary_python ? "" : ver, target_py); // Installs pkg and its runtime deps
             
             // Verify installation actually happened
             fs::path sp = get_site_packages(m_cfg);
@@ -2287,19 +2300,36 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             std::replace(p_name_alt.begin(), p_name_alt.end(), '-', '_');
             
             bool installed = false;
+            // 1. Check for directory, python file, or shared library
             if (fs::exists(sp / p_name) || fs::exists(sp / (p_name + ".py"))) installed = true;
             else if (fs::exists(sp / p_name_alt) || fs::exists(sp / (p_name_alt + ".py"))) installed = true;
+            else {
+                // Check for common shared library extensions (C extensions)
+                for (const auto& entry : fs::directory_iterator(sp)) {
+                    std::string fname = entry.path().filename().string();
+                    std::string low_fname = fname;
+                    std::transform(low_fname.begin(), low_fname.end(), low_fname.begin(), ::tolower);
+                    if (low_fname.find(p_name_alt) == 0) {
+                        if (low_fname.ends_with(".so") || low_fname.ends_with(".pyd") || low_fname.ends_with(".dylib") || low_fname.find(".so.") != std::string::npos) {
+                            installed = true;
+                            break;
+                        }
+                    }
+                }
+            }
             
-            // Fallback: Check for any .dist-info that starts with our safe name
+            // 2. Fallback: Check for any .dist-info that starts with our safe name
             if (!installed) {
                 for (const auto& entry : fs::directory_iterator(sp)) {
                     std::string entry_name = entry.path().filename().string();
-                    std::transform(entry_name.begin(), entry_name.end(), entry_name.begin(), ::tolower);
-                    std::replace(entry_name.begin(), entry_name.end(), '-', '_');
-                    
-                    if (entry_name.find(p_name_alt) == 0 && entry_name.find(".dist-info") != std::string::npos) {
-                        installed = true;
-                        break;
+                    if (entry_name.find(".dist-info") != std::string::npos) {
+                        std::string norm_entry = entry_name;
+                        std::transform(norm_entry.begin(), norm_entry.end(), norm_entry.begin(), ::tolower);
+                        std::replace(norm_entry.begin(), norm_entry.end(), '-', '_');
+                        if (norm_entry.find(p_name_alt) == 0) {
+                            installed = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -2307,7 +2337,11 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             if (installed) {
                 res.install = true;
             } else {
-                 std::cout << RED << "❌ Installation verification failed: " << pkg << " files not found." << RESET << std::endl;
+                 if (!install_ok) {
+                     std::cout << RED << "❌ Installation failed for " << pkg << " (resolve_and_install returned false)" << RESET << std::endl;
+                 } else {
+                     std::cout << RED << "❌ Installation verification failed: " << pkg << " files not found." << RESET << std::endl;
+                 }
                  res.install = false;
             }
 
@@ -3492,10 +3526,13 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
             record_manual_install(cfg, args[i], true);
         }
         if (targets.empty()) { std::cout << "Usage: spip install <packages>" << std::endl; return; }
-        resolve_and_install(cfg, targets);
-        commit_state(cfg, "Manually installed " + pkg_str);
-        std::cout << GREEN << "✔ Environment updated and committed." << RESET << std::endl;
-        verify_environment(cfg);
+        if (resolve_and_install(cfg, targets)) {
+            commit_state(cfg, "Manually installed " + pkg_str);
+            std::cout << GREEN << "✔ Environment updated and committed." << RESET << std::endl;
+            verify_environment(cfg);
+        } else {
+            std::cerr << RED << "❌ Some packages failed to install." << RESET << std::endl;
+        }
     }
     else if (command == "uninstall" || command == "remove") {
         setup_project_env(cfg);
