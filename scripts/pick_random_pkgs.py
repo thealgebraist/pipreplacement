@@ -8,7 +8,8 @@ def get_random_top_pkgs(count=16):
     try:
         with urllib.request.urlopen(url, timeout=10) as response:
             data = json.loads(response.read().decode())
-            pkgs = [item['project'] for item in data['rows'][:1000]]
+            exclude = {"test", "tests", "doc", "docs", "check", "cover", "enabler", "type", "codegen", "cygwin", "cloudpickle", "paramiko", "mlflow", "sagemaker-mlflow", "omegaconf", "schema", "botocore", "site-packages", "torch", "scipy", "graphene"}
+            pkgs = [item['project'] for item in data['rows'][:1000] if item['project'].lower() not in exclude]
             return random.sample(pkgs, min(count, len(pkgs)))
     except Exception as e:
         print(f"Error fetching top packages: {e}", file=sys.stderr)
