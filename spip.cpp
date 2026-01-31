@@ -20,6 +20,7 @@
 #include <sys/resource.h>
 #include <csignal>
 #include <sqlite3.h>
+#include <future>
 
 volatile std::atomic<bool> g_interrupted{false};
 
@@ -48,14 +49,21 @@ public:
     ResourceProfiler(fs::path p = "") : track_path(p) {
         start_wall = std::chrono::steady_clock::now();
         getrusage(RUSAGE_SELF, &start_usage);
-        start_disk = (track_path.empty()) ? 0 : static_cast<intmax_t>(get_dir_size(track_path));
+        if (!track_path.empty() && fs::exists(track_path)) {
+            start_disk = static_cast<intmax_t>(get_dir_size(track_path));
+        } else {
+            start_disk = 0;
+        }
     }
 
     ResourceUsage stop() {
         auto end_wall = std::chrono::steady_clock::now();
         struct rusage end_usage;
         getrusage(RUSAGE_SELF, &end_usage);
-        intmax_t end_disk = (track_path.empty()) ? 0 : static_cast<intmax_t>(get_dir_size(track_path));
+        intmax_t end_disk = 0;
+        if (!track_path.empty() && fs::exists(track_path)) {
+             end_disk = static_cast<intmax_t>(get_dir_size(track_path));
+        }
 
         double user_time = (end_usage.ru_utime.tv_sec - start_usage.ru_utime.tv_sec) +
                            (end_usage.ru_utime.tv_usec - start_usage.ru_utime.tv_usec) / 1e6;
@@ -92,8 +100,8 @@ struct Config {
 		fs::path project_env_path;
         fs::path db_file;
 		std::string pypi_mirror = "https://pypi.org"; // Default
-		}
-;
+        int concurrency = std::thread::hardware_concurrency(); 
+};
 
 class ErrorKnowledgeBase {
     sqlite3* db = nullptr;
@@ -286,7 +294,113 @@ bool branch_exists(const Config& cfg, const std::string& branch) {
     return true;
 }
 
+
+
+std::string get_platform_tuple() {
+#ifdef __APPLE__
+    #if defined(__aarch64__)
+        return "aarch64-apple-darwin";
+    #else
+        return "x86_64-apple-darwin";
+    #endif
+#elif defined(__linux__)
+    return "x86_64-unknown-linux-gnu";
+#else
+    return "unknown";
+#endif
+}
+
+std::string get_full_version_map(const std::string& short_ver) {
+    if (short_ver == "3.13") return "3.13.0";
+    if (short_ver == "3.12") return "3.12.7";
+    if (short_ver == "3.11") return "3.11.9";
+    if (short_ver == "3.10") return "3.10.16"; // Was 3.10.19 in recent tags, safe fallback
+    if (short_ver == "3.9") return "3.9.21";
+    if (short_ver == "3.8") return "3.8.20";
+    if (short_ver == "3.7") return "3.7.17"; // 20241016 tag supports 3.7.17
+    if (short_ver == "2.7") return "2.7.18"; // 20241016 tag supports 2.7.18
+    return short_ver + ".0"; // Fallback guess
+}
+
+std::string ensure_python_bin(const Config& cfg, const std::string& version) {
+    std::string safe_v = "";
+    for(char c : version) if(std::isalnum(c) || c == '.') safe_v += c;
+
+    // 1. Check system path
+    std::string python_bin = "python" + safe_v;
+    std::string path_check = std::format("command -v {} 2>/dev/null", python_bin);
+    if (!get_exec_output(path_check).empty()) {
+        return python_bin; 
+    }
+    
+    // For 2.7, simply 'python2' check
+    if (safe_v == "2.7") {
+         if (!get_exec_output("command -v python2 2>/dev/null").empty()) return "python2";
+    }
+
+    // 2. Check local standalones
+    fs::path pythons_dir = cfg.spip_root / "pythons";
+    fs::path local_python = pythons_dir / safe_v / "bin" / ("python" + safe_v); 
+    // Usually standalone expands to python/bin/python3 or python/bin/python for 2.7
+    
+    fs::path install_bin_dir = pythons_dir / safe_v / "python" / "bin";
+    
+    if (safe_v == "2.7") {
+        if (fs::exists(install_bin_dir / "python")) return (install_bin_dir / "python").string();
+        if (fs::exists(install_bin_dir / "python2")) return (install_bin_dir / "python2").string();
+    } else {
+        if (fs::exists(install_bin_dir / "python3")) return (install_bin_dir / "python3").string();
+    }
+    // Check if previously assumed path exists
+    if (fs::exists(local_python)) return local_python.string();
+
+    // 3. Download if missing
+    std::cout << YELLOW << "⚠️  " << python_bin << " not found. Downloading standalone build..." << RESET << std::endl;
+    if (!fs::exists(pythons_dir)) fs::create_directories(pythons_dir);
+
+    // Using 20241016 which is very stable for these versions
+    std::string tag = "20241016"; 
+    std::string full_ver = get_full_version_map(safe_v);
+    std::string platform = get_platform_tuple();
+    
+    // Url construction: 
+    // https://github.com/indygreg/python-build-standalone/releases/download/20241016/cpython-3.12.7+20241016-aarch64-apple-darwin-install_only.tar.gz
+    std::string filename = std::format("cpython-{}+{}-{}-install_only.tar.gz", full_ver, tag, platform);
+    std::string url = std::format("https://github.com/indygreg/python-build-standalone/releases/download/{}/{}", tag, filename);
+    
+    fs::path archive_path = pythons_dir / filename;
+    fs::path dest_dir = pythons_dir / safe_v;
+    
+    std::cout << BLUE << "📥 Downloading " << url << "..." << RESET << std::endl;
+    std::string dl_cmd = std::format("curl -L -s -# {} -o {}", quote_arg(url), quote_arg(archive_path.string()));
+    int ret = std::system(dl_cmd.c_str());
+    
+    if (ret != 0 || !fs::exists(archive_path) || fs::file_size(archive_path) < 1000) {
+        std::cerr << RED << "❌ Failed to download Python " << full_ver << " from " << url << RESET << std::endl;
+        // Fallback to python3 if really desperate
+        return "python3"; 
+    }
+    
+    std::cout << BLUE << "📦 Unpacking to " << dest_dir.string() << "..." << RESET << std::endl;
+    fs::create_directories(dest_dir);
+    // tar -xzf archive -C dest
+    std::string tar_cmd = std::format("tar -xzf {} -C {}", quote_arg(archive_path.string()), quote_arg(dest_dir.string()));
+    std::system(tar_cmd.c_str());
+    fs::remove(archive_path);
+    
+    // Determine path after unpack
+    // Usually ./python/bin/python3
+    local_python = dest_dir / "python" / "bin" / "python3";
+    if (safe_v == "2.7") {
+         local_python = dest_dir / "python" / "bin" / "python";
+    }
+    if (fs::exists(local_python)) return local_python.string();
+    
+    return "python3"; // Fallback
+}
+
 void create_base_version(const Config& cfg, const std::string& version) {
+
     std::string branch = "base/" + version;
     if (branch_exists(cfg, branch)) return;
 
@@ -303,17 +417,14 @@ void create_base_version(const Config& cfg, const std::string& version) {
     fs::path temp_venv = cfg.spip_root / ("temp_venv_" + safe_v);
     
     // Try pythonX.Y, fallback to python3 if matching version
-    std::string python_bin = "python" + safe_v;
-    // Check if pythonX.Y exists roughly? Or just try. spip assumes python installed.
-    // We can just try the command.
-    
-    std::string venv_cmd = std::format("{} -m venv {}", python_bin, quote_arg(temp_venv.string()));
+    std::string python_bin = ensure_python_bin(cfg, safe_v);
+
+    std::string venv_cmd = std::format("{} -m venv {}", quote_arg(python_bin), quote_arg(temp_venv.string()));
     int ret = std::system(venv_cmd.c_str());
     if (ret != 0) {
-        // Fallback to plain python3 if version matches system or just try python3
-        std::cout << YELLOW << "⚠️ " << python_bin << " not found, trying python3..." << RESET << std::endl;
-        venv_cmd = std::format("python3 -m venv {}", quote_arg(temp_venv.string()));
-        ret = std::system(venv_cmd.c_str());
+        // Only fallback if ensure_python returned something broken, which implies download failed or system broken
+        std::cerr << RED << "❌ Failed to create venv with " << python_bin << RESET << std::endl;
+        std::exit(1);
     }
 
     if (ret != 0) {
@@ -601,6 +712,12 @@ int score_wheel(const std::string& url, const std::string& target_py = "3.12") {
     return score;
 }
 
+fs::path get_cached_wheel_path(const Config& cfg, const PackageInfo& info) {
+    // Should match parallel_download logic: just flattened name
+    std::string filename = info.name + "-" + info.version + ".whl";
+    return cfg.spip_root / filename; 
+}
+
 PackageInfo get_package_info(const std::string& pkg, const std::string& version = "", const std::string& target_py = "3.12") {
     fs::path db_file = get_db_path(pkg);
     if (!fs::exists(db_file)) {
@@ -711,7 +828,7 @@ PackageInfo get_package_info(const std::string& pkg, const std::string& version 
     return info;
 }
 
-void resolve_and_install(const Config& cfg, const std::vector<std::string>& targets, const std::string& version = "") {
+void resolve_and_install(const Config& cfg, const std::vector<std::string>& targets, const std::string& version = "", const std::string& target_py = "3.12") {
     std::vector<std::string> queue = targets;
     std::set<std::string> installed;
     std::map<std::string, PackageInfo> resolved;
@@ -727,7 +844,7 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         if (installed.count(lower_name)) continue;
         
         // Try to pass target_py if we can infer it (harder here, but default 3.12)
-        PackageInfo info = (i == 1 && !version.empty()) ? get_package_info(name, version) : get_package_info(name);
+        PackageInfo info = (i == 1 && !version.empty()) ? get_package_info(name, version, target_py) : get_package_info(name, "", target_py);
         
         if (info.wheel_url.empty()) {
              std::cout << RED << "❌ Could not find wheel URL for " << name << RESET << std::endl;
@@ -1316,7 +1433,7 @@ std::string parse_python_requirement(const std::string& req) {
     return best;
 }
 
-std::map<std::string, PackageInfo> resolve_only(const std::vector<std::string>& targets, const std::string& version = "") {
+std::map<std::string, PackageInfo> resolve_only(const std::vector<std::string>& targets, const std::string& version = "", const std::string& target_py = "3.12") {
     std::vector<std::string> queue = targets;
     std::set<std::string> visited;
     std::map<std::string, PackageInfo> resolved;
@@ -1330,7 +1447,7 @@ std::map<std::string, PackageInfo> resolve_only(const std::vector<std::string>& 
         
         if (visited.count(lower_name)) continue;
         
-        PackageInfo info = (i == 1 && !version.empty()) ? get_package_info(name, version) : get_package_info(name);
+        PackageInfo info = (i == 1 && !version.empty()) ? get_package_info(name, version, target_py) : get_package_info(name, "", target_py);
         if (info.wheel_url.empty()) continue;
         
         resolved[lower_name + "-" + info.version] = info;
@@ -1409,36 +1526,77 @@ std::string extract_exception(const std::string& output) {
     return last_err;
 }
 
-void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto", bool profile = false, bool no_cleanup = false, int revision_limit = -1, bool test_all_revisions = false) {
-    std::cout << MAGENTA << "🧪 Starting Build Server Mode (Matrix Test) for " << BOLD << pkg << RESET << std::endl;
+void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto", bool profile = false, bool no_cleanup = false, int revision_limit = -1, bool test_all_revisions = false, bool vary_python = false, int pkg_revision_limit = 1) {
+    if (vary_python) {
+        std::cout << MAGENTA << "🧪 Starting Compatibility Test (Python Matrix) for " << BOLD << pkg << RESET << std::endl;
+    } else {
+        std::cout << MAGENTA << "🧪 Starting Build Server Mode (Matrix Test) for " << BOLD << pkg << RESET << std::endl;
+    }
     if (profile) std::cout << YELLOW << "📊 Profiling mode enabled." << RESET << std::endl;
     
-    std::vector<std::string> versions = get_all_versions(pkg);
+    std::vector<std::string> versions;
+    if (vary_python) {
+        // Hardcoded list of modern Python versions
+        versions = {"3.13", "3.12", "3.11", "3.10", "3.9", "3.8", "3.7", "2.7"};
+        if (revision_limit > 0) {
+            if (versions.size() > static_cast<size_t>(revision_limit)) {
+                versions.resize(revision_limit);
+            }
+        } else {
+             if (versions.size() > 3) versions.resize(3);
+        }
+
+        // If checking previous versions of PACKAGE too
+        if (pkg_revision_limit > 1) {
+             std::vector<std::string> pkg_vers = get_all_versions(pkg);
+             if (pkg_vers.size() > static_cast<size_t>(pkg_revision_limit)) {
+                 pkg_vers.erase(pkg_vers.begin(), pkg_vers.begin() + (pkg_vers.size() - pkg_revision_limit));
+             }
+             // Create Cartesian product
+             std::vector<std::string> combined;
+             for (const auto& py : versions) {
+                 for (const auto& pv : pkg_vers) {
+                     combined.push_back(py + ":" + pv);
+                 }
+             }
+             versions = combined;
+        }
+
+    } else {
+        versions = get_all_versions(pkg);
+    }
+
     if (versions.empty()) {
-        std::cerr << RED << "❌ No versions found for " << pkg << RESET << std::endl;
+        std::cerr << RED << "❌ No versions found/selected for " << pkg << RESET << std::endl;
         return;
     }
 
-    std::cout << BLUE << "📊 Found " << versions.size() << " versions. ";
+    std::cout << BLUE << "📊 Found " << versions.size() << " " << (vary_python ? "python environments" : "versions") << ". ";
 
-    if (test_all_revisions) {
-        std::cout << "Testing all..." << RESET << std::endl;
-        // 'versions' vector is already complete, no slicing needed.
-    } else if (revision_limit > 0) { // --limit N specified
-        if (versions.size() > static_cast<size_t>(revision_limit)) {
-            std::cout << "Limiting to last " << revision_limit << "..." << RESET << std::endl;
-            // Keep the last 'revision_limit' versions.
-            versions.erase(versions.begin(), versions.begin() + (versions.size() - revision_limit));
-        } else {
-            std::cout << "Testing all available (" << versions.size() << ") within limit." << RESET << std::endl;
-            // All available versions are within the limit, so test all. No slicing needed.
+    if (!vary_python) {
+        if (test_all_revisions) {
+            std::cout << "Testing all..." << RESET << std::endl;
+            // 'versions' vector is already complete, no slicing needed.
+        } else if (revision_limit > 0) { // --limit N specified
+            if (versions.size() > static_cast<size_t>(revision_limit)) {
+                std::cout << "Limiting to last " << revision_limit << "..." << RESET << std::endl;
+                // Keep the last 'revision_limit' versions.
+                versions.erase(versions.begin(), versions.begin() + (versions.size() - revision_limit));
+            } else {
+                std::cout << "Testing all available (" << versions.size() << ") within limit." << RESET << std::endl;
+                // All available versions are within the limit, so test all. No slicing needed.
+            }
+        } else { // Default case: no --all, no --limit specified.
+            // Apply the heuristic of last 5 if total versions > 5.
+            std::cout << "Testing all available (" << versions.size() << ")." << RESET << std::endl;
+            if (versions.size() > 5) { 
+                versions.erase(versions.begin(), versions.begin() + (versions.size() - 5));
+            }
         }
-    } else { // Default case: no --all, no --limit specified.
-        // Apply the heuristic of last 5 if total versions > 5.
-        std::cout << "Testing all available (" << versions.size() << ")." << RESET << std::endl;
-        if (versions.size() > 5) { 
-            versions.erase(versions.begin(), versions.begin() + (versions.size() - 5));
-        }
+    } else {
+        std::cout << "Testing: ";
+        for(const auto& v : versions) std::cout << v << " ";
+        std::cout << RESET << std::endl;
     }
     
     // Initial analysis for the latest version to show config
@@ -1446,8 +1604,8 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     std::cout << CYAN << "📋 Configuration Info:" << RESET << std::endl;
     std::cout << "  - Package:         " << BOLD << pkg << RESET << std::endl;
     std::cout << "  - Latest Version:  " << latest_info.version << std::endl;
-    std::cout << "  - Python Req:      " << (latest_info.requires_python.empty() ? "None" : latest_info.requires_python) << std::endl;
-    std::cout << "  - Matrix Size:     " << versions.size() << " versions to test" << std::endl;
+    if (!vary_python) std::cout << "  - Python Req:      " << (latest_info.requires_python.empty() ? "None" : latest_info.requires_python) << std::endl;
+    std::cout << "  - Matrix Size:     " << versions.size() << (vary_python ? " combinations" : " versions to test") << std::endl;
     if (python_version != "auto") {
         std::cout << "  - Python Mode:     Manual Override (" << python_version << ")" << std::endl;
     } else {
@@ -1463,12 +1621,41 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
     ResourceProfiler* res_prof = profile ? new ResourceProfiler() : nullptr;
     std::map<std::string, PackageInfo> all_needed;
-    for (const auto& ver : versions) {
-        auto resolved = resolve_only({pkg}, ver);
+    std::mutex m_needed;
+    std::vector<std::future<void>> futures;
+    std::atomic<int> completed{0};
+    // int total_res = versions.size(); // Unused
+
+    auto task = [&](const std::string& ver) {
+        // v_info logic inside resolve_only handles caching, but let's be safe
+        std::map<std::string, PackageInfo> resolved;
+        if (vary_python) {
+             if (ver.find(':') != std::string::npos) {
+                auto parts = split(ver, ':');
+                resolved = resolve_only({pkg}, parts[1], parts[0]);
+             } else {
+                resolved = resolve_only({pkg}, "", ver);
+             }
+        } else {
+             resolved = resolve_only({pkg}, ver, python_version);
+        }
+
+        std::lock_guard<std::mutex> l(m_needed);
         for (const auto& [id, info] : resolved) {
             all_needed[id] = info;
         }
+        completed++;
+    };
+
+    for (const auto& ver : versions) {
+        if (futures.size() >= (size_t)cfg.concurrency * 2) {
+             // Simple throttle
+             for(auto& f : futures) f.wait();
+             futures.clear();
+        }
+        futures.push_back(std::async(std::launch::async, task, ver));
     }
+    for(auto& f : futures) f.wait();
     if (profile && res_prof) {
         auto stats = res_prof->stop();
         std::cout << BLUE << "  [Profile] Resolution: " << stats.wall_time_seconds << "s wall, " << stats.cpu_time_seconds << "s CPU" << RESET << std::endl;
@@ -1478,12 +1665,44 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     std::vector<PackageInfo> info_list;
     for (const auto& [id, info] : all_needed) info_list.push_back(info);
     
+    // In vary_python mode, we might need different info for different python versions if wheels differ.
+    // For now we assume resolver fetches compatible ones for defaults; but actually parallel_download
+    // just downloads based on the 'info' collected.
+    // If vary_python is true, we haven't done pre-resolution for all python versions here (loop above uses versions which are just python strings).
+    // Fix: In vary_python mode, pre-resolve for EACH python version to ensure we download correct wheels.
+    // Fix: In vary_python mode, pre-resolve for EACH python version to ensure we download correct wheels.
+    if (vary_python) {
+        // Just rely on workers for now as before
+    }
+
     res_prof = profile ? new ResourceProfiler(cfg.spip_root) : nullptr;
     parallel_download(cfg, info_list);
     if (profile && res_prof) {
         auto stats = res_prof->stop();
         std::cout << BLUE << "  [Profile] Download: " << stats.wall_time_seconds << "s wall, Disk delta: " << (stats.disk_delta_bytes / 1024) << " KB" << RESET << std::endl;
         delete res_prof;
+    }
+
+    // Git Storage for Wheels (User Request)
+    if (!info_list.empty()) {
+        std::string wheels_branch = "wheels";
+        if (branch_exists(cfg, wheels_branch) || std::system(std::format("cd {} && git branch {}", quote_arg(cfg.repo_path.string()), wheels_branch).c_str()) == 0) {
+             // Create a specific worktree for wheels if not exists
+             fs::path wheel_wt = cfg.spip_root / "wheels_wt";
+             if (!fs::exists(wheel_wt)) {
+                 std::system(std::format("cd {} && git worktree add --detach {} {}", quote_arg(cfg.repo_path.string()), quote_arg(wheel_wt.string()), wheels_branch).c_str());
+             }
+             
+             // Copy wheels
+             for (const auto& info : info_list) {
+                 fs::path cached = get_cached_wheel_path(cfg, info);
+                 if (fs::exists(cached)) {
+                     fs::copy_file(cached, wheel_wt / cached.filename(), fs::copy_options::overwrite_existing);
+                 }
+             }
+             // Commit
+             std::system(std::format("cd {} && git add . && git commit -m 'Add wheels' --quiet", quote_arg(wheel_wt.string())).c_str());
+        }
     }
 
     fs::path test_script = custom_test_script;
@@ -1521,7 +1740,8 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     std::vector<ErrorLog> error_logs;
 
     int total_vers = versions.size();
-    fs::path state_file = cfg.envs_root / (".spip_matrix_state_" + pkg + ".json");
+
+    fs::path state_file = cfg.envs_root / (".spip_" + std::string(vary_python ? "compat_" : "matrix_state_") + pkg + ".json");
     std::map<std::string, Result> state_results;
     
     // Load existing state
@@ -1575,10 +1795,28 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         
             Result res { ver, false, false, false, {0,0,0,0} };
         
-        PackageInfo v_info = get_package_info(pkg, ver);
-        std::string target_py = python_version;
-        if (target_py == "auto") {
-            target_py = parse_python_requirement(v_info.requires_python);
+
+        
+        PackageInfo v_info;
+        std::string target_py;
+
+        if (vary_python) {
+            // Check if combined key
+            if (ver.find(':') != std::string::npos) {
+                auto parts = split(ver, ':');
+                target_py = parts[0];
+                std::string pkg_v = parts[1];
+                v_info = get_package_info(pkg, pkg_v);
+            } else {
+                v_info = get_package_info(pkg); // Always test latest package version in compat mode
+                target_py = ver; // ver is the python version (e.g. "3.12")
+            }
+        } else {
+            v_info = get_package_info(pkg, ver);
+            target_py = python_version;
+            if (target_py == "auto") {
+                target_py = parse_python_requirement(v_info.requires_python);
+            }
         }
 
         {
@@ -1587,12 +1825,14 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                       << " (Python " << YELLOW << target_py << RESET << ")" << std::endl;
         }
 
-        ResourceProfiler* v_prof = profile ? new ResourceProfiler(cfg.envs_root) : nullptr;
-
         // Use a unique path per version for parallel isolation
         std::string safe_ver = ver;
         for(char& c : safe_ver) if(!isalnum(c) && c!='.' && c!='-') c = '_';
         fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash + "_" + safe_ver);
+
+        ResourceProfiler* v_prof = profile ? new ResourceProfiler(matrix_path) : nullptr;
+        
+        // Ensure clean start for this version
         
         // Ensure clean start for this version
         if(fs::exists(matrix_path)) fs::remove_all(matrix_path);
@@ -1640,7 +1880,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         
         // 1. Install main package and its dependencies
         try {
-            resolve_and_install(m_cfg, {pkg}, ver); // Installs pkg and its runtime deps
+            resolve_and_install(m_cfg, {pkg}, vary_python ? "" : ver, target_py); // Installs pkg and its runtime deps
             
             // Verify installation actually happened
             fs::path sp = get_site_packages(m_cfg);
@@ -1700,7 +1940,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                 if (!dev_targets.empty()) {
                     // Install dev dependencies into the same environment
                     // resolve_and_install will download necessary wheels if not cached
-                    resolve_and_install(m_cfg, dev_targets);
+                    resolve_and_install(m_cfg, dev_targets, "", target_py);
                 }
             }
             
@@ -1723,7 +1963,8 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                  std::string pytest_flags = "--maxfail=1 -q";
                  bool success = false;
                  
-                 for (int attempt = 0; attempt < 3; ++attempt) {
+                 std::set<std::string> applied_fixes; // Track fixes to prevent loops
+                 for (int attempt = 0; attempt < 10; ++attempt) { // Increased attempt count to allow for chain reaction fixes
                      std::string pytest_cmd = std::format("{} -m pytest {} {}", quote_arg(python_bin.string()), quote_arg(p_path.string()), pytest_flags);
                      std::string test_out = get_exec_output(pytest_cmd + " 2>&1"); // Ensure we capture everything
                      
@@ -1737,10 +1978,15 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                       bool action_taken = false;
                       if (!exc_found.empty()) {
                           std::string learned_fix = kb.lookup_fix(exc_found);
-                          if (!learned_fix.empty()) {
+                          // Only apply if we haven't tried this specific fix in this run yet
+                          if (!learned_fix.empty() && applied_fixes.find(learned_fix) == applied_fixes.end()) {
                               std::cout << BLUE << "💡 Found learned fix for \"" << exc_found << "\": " << GREEN << learned_fix << RESET << std::endl;
+                              bool fix_applied = false;
                               if (learned_fix.starts_with("install ")) {
-                                  try { resolve_and_install(m_cfg, {learned_fix.substr(8)}); action_taken = true; } catch (...) {}
+                                  try { 
+                                      resolve_and_install(m_cfg, {learned_fix.substr(8)}, "", target_py); 
+                                      fix_applied = true; 
+                                  } catch (...) {}
                               } else if (learned_fix == "Inject sitecustomize.py shim") {
                                   fs::path sp = get_site_packages(m_cfg);
                                   if (!sp.empty()) {
@@ -1748,8 +1994,12 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                                       ofs << "\nimport collections\nimport collections.abc\n"
                                           << "for _n in ['Mapping', 'MutableMapping', 'Sequence', 'MutableSequence', 'Iterable', 'MutableSet', 'Callable', 'Set']:\n"
                                           << "    if not hasattr(collections, _n) and hasattr(collections.abc, _n): setattr(collections, _n, getattr(collections.abc, _n))\n";
-                                      action_taken = true;
+                                      fix_applied = true;
                                   }
+                              }
+                              if (fix_applied) {
+                                  action_taken = true;
+                                  applied_fixes.insert(learned_fix);
                               }
                           }
                       }
@@ -1790,13 +2040,18 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                          if (missing_pkg == "path") missing_pkg = "path.py"; // Common confusion, or 'jaraco.path' ? 'path' usually refers to 'path.py' on PyPI or just 'path'
 
                          if (missing_pkg.find('.') == std::string::npos && missing_pkg != p_name) {
-                             std::cout << YELLOW << "⚠️ Missing test dependency: " << missing_pkg << ". Installing..." << RESET << std::endl;
-                             try {
-                                 resolve_and_install(m_cfg, {missing_pkg});
-                                 action_taken = true;
-                                 kb.store(pkg, target_py, exc_found, "install " + missing_pkg);
-                             } catch (...) {
-                                 std::cout << RED << "❌ Failed to install " << missing_pkg << RESET << std::endl;
+                             // Check repetition
+                             std::string fix_key = "install " + missing_pkg;
+                             if (applied_fixes.find(fix_key) == applied_fixes.end()) {
+                                 std::cout << YELLOW << "⚠️ Missing test dependency: " << missing_pkg << ". Installing..." << RESET << std::endl;
+                                 try {
+                                     resolve_and_install(m_cfg, {missing_pkg}, "", target_py);
+                                     action_taken = true;
+                                     applied_fixes.insert(fix_key);
+                                     kb.store(pkg, target_py, exc_found, fix_key);
+                                 } catch (...) {
+                                     std::cout << RED << "❌ Failed to install " << missing_pkg << RESET << std::endl;
+                                 }
                              }
                          }
                      } 
@@ -1855,7 +2110,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                     if (!learned_fix.empty()) {
                         std::cout << BLUE << "💡 Found learned fix for \"" << exc_found_kb << "\": " << GREEN << learned_fix << RESET << std::endl;
                         if (learned_fix.starts_with("install ")) {
-                            try { resolve_and_install(m_cfg, {learned_fix.substr(8)}); action_taken = true; } catch (...) {}
+                            try { resolve_and_install(m_cfg, {learned_fix.substr(8)}, "", target_py); action_taken = true; } catch (...) {}
                         } else if (learned_fix == "Inject sitecustomize.py shim") {
                               fs::path sp = get_site_packages(m_cfg);
                               if (!sp.empty()) {
@@ -1897,8 +2152,8 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                     if (missing_pkg != p_name) {
                         std::cout << YELLOW << "⚠️ [CustomTest] Missing dependency: " << missing_pkg << ". Installing..." << RESET << std::endl;
                         try { 
-                            resolve_and_install(m_cfg, {missing_pkg}); 
-                            action_taken = true; 
+                            resolve_and_install(m_cfg, {missing_pkg}, "", target_py); 
+                            action_taken = true;  
                             kb.store(pkg, target_py, exc_found, "install " + missing_pkg);
                         } catch (...) {}
                     }
@@ -1953,7 +2208,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     }; // end lambda
 
     // Launch workers
-    for(int i=0; i<max_threads; ++i) workers.emplace_back(worker_task);
+    for(unsigned int i=0; i<max_threads; ++i) workers.emplace_back(worker_task);
     
     // Join all
     for(auto& t : workers) t.join();
@@ -2617,9 +2872,10 @@ void profile_package(const Config& cfg, const std::string& pkg, bool ai_review =
 
 void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
-        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle|matrix|profile> [args...]" << std::endl;
+        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle|matrix|compat|profile> [args...]" << std::endl;
         std::cout << "  cleanup|gc [--all] - Perform maintenance, optionally remove all environments" << std::endl;
         std::cout << "  matrix <pkg> [--python version] [--profile] [--no-cleanup] [test.py] - Build-server mode: test all versions of a package" << std::endl;
+        std::cout << "  compat <pkg> [N] [--profile] - Test compatibility against N latest Python versions" << std::endl;
         std::cout << "  profile <pkg> - Profile bytecode complexity, memory, and disk usage for an installed package" << std::endl;
         return;
     }
@@ -2911,7 +3167,38 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
             return;
         }
         
-        matrix_test(cfg, pkg, test_script, python_ver, profile, no_cleanup, revision_limit, test_all_revisions);
+        matrix_test(cfg, pkg, test_script, python_ver, profile, no_cleanup, revision_limit, test_all_revisions, false);
+    }
+    else if (command == "compat") {
+        ensure_dirs(cfg);
+        if (args.size() < 2) {
+             std::cerr << "Usage: spip compat <package> [options]" << std::endl;
+             std::cerr << "Options:" << std::endl;
+             std::cerr << "  [N]                   Top N Python versions (default 3)" << std::endl;
+             std::cerr << "  --py <N>              Top N Python versions" << std::endl;
+             std::cerr << "  --pkg <M>             Top M Package versions" << std::endl;
+             std::cerr << "  --profile             Enable resource profiling" << std::endl;
+             return;
+        }
+
+        std::string pkg = args[1];
+        int n_py = 3; 
+        int m_pkg = 1;
+        bool profile = false;
+        
+        for (size_t i = 2; i < args.size(); ++i) {
+            if (args[i] == "--profile") profile = true;
+            else if (args[i] == "--py" && i + 1 < args.size()) n_py = std::stoi(args[++i]);
+            else if (args[i] == "--pkg" && i + 1 < args.size()) m_pkg = std::stoi(args[++i]);
+            else {
+                try {
+                    // Legacy positional arg check
+                    if (args[i].find("-") != 0) n_py = std::stoi(args[i]);
+                } catch (...) {}
+            }
+        }
+        
+        matrix_test(cfg, pkg, "", "auto", profile, false, n_py, false, true, m_pkg);
     }
     else if (command == "profile") {
         if (!require_args(args, 2, "Usage: spip profile <pkg> [--ai|--review]")) return;

@@ -1,6 +1,6 @@
 CXX = g++
 CXXFLAGS = -std=c++23 -O3 -Wall -Wextra -pedantic
-LDFLAGS =
+LDFLAGS = -lsqlite3
 
 all: build
 

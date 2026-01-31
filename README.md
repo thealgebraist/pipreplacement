@@ -21,6 +21,7 @@ A safer, version-controlled replacement for `pip` and `venv`.
 - `spip matrix <pkg> [--python version] [--profile] [--no-cleanup] [test.py]`: Build-server mode. Tests all available versions of a package.
   - `--profile`: Track and display CPU, wall time, and disk usage for each version.
   - `--no-cleanup`: Preserve the optimized reusable worktree for faster subsequent runs.
+- `spip compat <pkg> [N] [--profile]`: Compatibility Testing. Tests the package against the N latest Python versions to ensure cross-version stability.
 - `spip gc [--all]`: Cleanup orphaned environments, temporary files, and compact repositories. Use --all to remove all environments.
 - `spip log`: Show environment change history.
 

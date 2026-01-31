@@ -49,3 +49,4 @@
     - [x] **AI Resource Optimization**: `spip profile <pkg> --ai` uses Gemini to review the top 32 hotspots and suggest improvements to lower resource use.
     - [x] **Redundancy Analysis**: Detects repeated constant subexpressions (e.g., BUILD_MAP, BUILD_TUPLE) and suggests singleton/static optimization.
 - [x] **Resource Hog Study**: Conducted a study of 64 top packages to identify common resource hogs. Generated a PDF report with architectural suggestions.
+- [x] **Multi-Version Testing (`spip compat`)**: Implement feature to test a package against N latest Python versions to ensure compatibility.
