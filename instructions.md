@@ -41,6 +41,7 @@
 - [x] Applied refactorings: 3 helper functions extracted (get_site_packages, require_args, exec_with_setup), ~61 lines saved.
 - [x] Added 'spip top' and 'spip top --references' functionality.
 - [x] Fixed compilation errors in `spip.cpp` (undefined `Cyan` -> `CYAN`, incomplete regex iteration logic).
+- [x] Fixed all compilation warnings (unused vars, ignored return values).
 - [x] Refactored `spip matrix` for high-performance parallel execution (std::thread pool, atomic task tracking, isolated worktrees).
 - [x] Large-scale 64-package matrix stress test (10 versions each) to achieve ultimate robustness.
 - [x] Implement 4s-burst resume logic for `spip matrix` to satisfy strict execution constraints.

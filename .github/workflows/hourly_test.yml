@@ -46,14 +46,14 @@ jobs:
           export SPIP_NO_TMPFS=1
           
           timeout 10m bash -c '
-            for pkg in "$@"; do
+            for pkg in $1; do
               echo "----------------------------------------"
               echo "🧪 Testing: $pkg"
               # limit to 2 versions per pkg to ensure we finish 4 pkgs in 10m
               # use --threads 4 for parallel version testing
               ./spip matrix "$pkg" --limit 2 --threads 4 --telemetry
             done
-          ' -- $pkgs || echo "Test reached 10 minute timeout"
+          ' bash "$pkgs" || echo "Test reached 10 minute timeout"
 
       - name: Upload Telemetry
         if: always()
