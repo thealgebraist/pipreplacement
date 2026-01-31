@@ -45,18 +45,15 @@ jobs:
           # Use SPIP_NO_TMPFS=1 to avoid sudo mount issues in CI
           export SPIP_NO_TMPFS=1
           
-          # Convert space-separated pkgs to array
-          read -ra PKG_ARRAY <<< "$pkgs"
-          
           timeout 10m bash -c '
-            for pkg in "${PKG_ARRAY[@]}"; do
+            for pkg in "$@"; do
               echo "----------------------------------------"
               echo "🧪 Testing: $pkg"
               # limit to 2 versions per pkg to ensure we finish 4 pkgs in 10m
               # use --threads 4 for parallel version testing
               ./spip matrix "$pkg" --limit 2 --threads 4 --telemetry
             done
-          ' PKG_ARRAY=("${PKG_ARRAY[@]}") || echo "Test reached 10 minute timeout"
+          ' -- $pkgs || echo "Test reached 10 minute timeout"
 
       - name: Upload Telemetry
         if: always()

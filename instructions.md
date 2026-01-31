@@ -1,7 +1,7 @@
 # Project: Smart Pip (spip) - A Safe Pip Replacement
 
-**Developer**: Antigravity (The Solver)
-**Task**: Build a pip replacement that avoids global installs, system overwrites, and manual virtualenv management.
+**Developer**: Gemini Agent
+**Task**: Fix GitHub Action syntax error in hourly test workflow.
 
 ## Components
 
