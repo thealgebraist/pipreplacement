@@ -1,18 +1,36 @@
 spip
 .ninja_log
 .ninja_deps
-summary.log
-*.tgz
-summary.aux
-summary.out
-summary.pdf
+.ninja_lock
 .DS_Store
 __pycache__/
 *.pyc
-temp_parallel_test/*
-random_64_pkgs.txt
-stress_64_log.txt
+*.tgz
+
+# Build and Test Artifacts
+*.whl
+*.part.*
+*.db
 *.log
 *.out
 *.aux
-.ninja_lock
+*.pdf
+# Keep specific JSONs if needed, but usually these are logs
+*.json
+*.txt
+!README.md
+!instructions.md
+!task.md
+!spip_matrix_grammar.txt
+!all_packages.txt
+
+# Directories
+temp_*/
+trim_test_run/
+git_test/
+.hypothesis/
+.spip/
+
+# Test Scripts
+test_*_gen.py
+scripts/test_distributed.sh
