@@ -433,6 +433,11 @@ std::string quote_arg(const std::string& arg) {
     return result;
 }
 
+// Helper to suppress warn_unused_result for system calls where we handle errors or ignore them safely
+int run_shell(const char* cmd) {
+    return std::system(cmd);
+}
+
 std::string get_exec_output(const std::string& cmd) {
     std::string result;
     char buffer[128];
@@ -501,7 +506,7 @@ void ensure_envs_tmpfs(const Config& cfg) {
     if (get_exec_output(mount_check).empty()) {
         std::cout << MAGENTA << "🚀 Mounting " << cfg.envs_root << " as tmpfs for ultra-speed..." << RESET << std::endl;
         std::string mount_cmd = std::format("sudo mount -t tmpfs -o size=2G tmpfs {}", quote_arg(cfg.envs_root.string()));
-        std::system(mount_cmd.c_str());
+        run_shell(mount_cmd.c_str());
     }
 #endif
 }
@@ -515,7 +520,7 @@ void ensure_dirs(const Config& cfg) {
         std::cout << "Creating repo at: " << cfg.repo_path << std::endl;
         fs::create_directories(cfg.repo_path);
         std::string cmd = std::format("cd {} && git init && git commit --allow-empty -m \"Initial commit\"", quote_arg(cfg.repo_path.string()));
-        std::system(cmd.c_str());
+        run_shell(cmd.c_str());
         std::ofstream gitignore(cfg.repo_path / ".gitignore");
         gitignore << "# Full environment tracking\n";
         gitignore.close();
@@ -613,7 +618,7 @@ std::string ensure_python_bin(const Config& cfg, const std::string& version) {
     
     std::cout << BLUE << "📥 Downloading " << url << "..." << RESET << std::endl;
     std::string dl_cmd = std::format("curl -L -s -# {} -o {}", quote_arg(url), quote_arg(archive_path.string()));
-    int ret = std::system(dl_cmd.c_str());
+    int ret = run_shell(dl_cmd.c_str());
     
     if (ret != 0 || !fs::exists(archive_path) || fs::file_size(archive_path) < 1000) {
         std::cerr << RED << "❌ Failed to download Python " << full_ver << " from " << url << RESET << std::endl;
@@ -625,7 +630,7 @@ std::string ensure_python_bin(const Config& cfg, const std::string& version) {
     fs::create_directories(dest_dir);
     // tar -xzf archive -C dest
     std::string tar_cmd = std::format("tar -xzf {} -C {}", quote_arg(archive_path.string()), quote_arg(dest_dir.string()));
-    std::system(tar_cmd.c_str());
+    run_shell(tar_cmd.c_str());
     fs::remove(archive_path);
     
     // Determine path after unpack
@@ -660,7 +665,7 @@ void create_base_version(const Config& cfg, const std::string& version) {
     std::string python_bin = ensure_python_bin(cfg, safe_v);
 
     std::string venv_cmd = std::format("{} -m venv {}", quote_arg(python_bin), quote_arg(temp_venv.string()));
-    int ret = std::system(venv_cmd.c_str());
+    int ret = run_shell(venv_cmd.c_str());
     if (ret != 0) {
         // Only fallback if ensure_python returned something broken, which implies download failed or system broken
         std::cerr << RED << "❌ Failed to create venv with " << python_bin << RESET << std::endl;
@@ -686,7 +691,7 @@ void create_base_version(const Config& cfg, const std::string& version) {
         cfg.repo_path.string(), branch, temp_venv.string(), version, current_branch
     );
     
-    if (std::system(git_cmd.c_str()) != 0) {
+    if (run_shell(git_cmd.c_str()) != 0) {
         std::cerr << RED << "❌ Failed to commit base version " << version << RESET << std::endl;
         // Don't exit, maybe retry? But likely fatal.
         // Clean up
@@ -710,18 +715,18 @@ void setup_project_env(const Config& cfg, const std::string& version = "3") {
         std::cout << GREEN << "🌟 Creating new environment branch: " << branch << RESET << std::endl;
         std::string cmd = std::format("cd {} && git branch {} {}", 
             quote_arg(cfg.repo_path.string()), quote_arg(branch), quote_arg(base_branch));
-        std::system(cmd.c_str());
+        run_shell(cmd.c_str());
     }
 
     if (!fs::exists(cfg.project_env_path)) {
         std::cout << CYAN << "📂 Linking worktree for project..." << RESET << std::endl;
-        std::system(std::format("cd {} && git checkout main 2>/dev/null", quote_arg(cfg.repo_path.string())).c_str());
+        run_shell(std::format("cd {} && git checkout main 2>/dev/null", quote_arg(cfg.repo_path.string())).c_str());
         std::string cmd = std::format("cd {} && git worktree add {} {}", 
             quote_arg(cfg.repo_path.string()), quote_arg(cfg.project_env_path.string()), quote_arg(branch));
-        int ret = std::system(cmd.c_str());
+        int ret = run_shell(cmd.c_str());
         if (ret != 0) {
-            std::system(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
-            std::system(cmd.c_str());
+            run_shell(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
+            run_shell(cmd.c_str());
         }
         std::ofstream os(cfg.project_env_path / ".project_origin");
         os << cfg.current_project.string();
@@ -731,7 +736,7 @@ void setup_project_env(const Config& cfg, const std::string& version = "3") {
 void commit_state(const Config& cfg, const std::string& msg) {
     std::string cmd = std::format("cd {} && git add -A && git commit -m {} --allow-empty", 
         quote_arg(cfg.project_env_path.string()), quote_arg(msg));
-    std::system(cmd.c_str());
+    run_shell(cmd.c_str());
 }
 
 void init_db() {
@@ -740,7 +745,7 @@ void init_db() {
     if (!fs::exists(db_path)) {
         fs::create_directories(db_path);
         std::string cmd = std::format("cd \"{}\" && git init && git commit --allow-empty -m \"Initial DB commit\"", db_path.string());
-        std::system(cmd.c_str());
+        run_shell(cmd.c_str());
     }
 }
 
@@ -830,7 +835,7 @@ void fetch_package_metadata(const Config& cfg, const std::string& pkg) {
     fs::path temp_target = target;
     temp_target += ".tmp";
     std::string cmd = std::format("curl -s -L \"{}\" -o \"{}\"", url, temp_target.string());
-    std::system(cmd.c_str());
+    run_shell(cmd.c_str());
     if (fs::exists(temp_target)) {
         fs::rename(temp_target, target);
     }
@@ -1153,7 +1158,7 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
                 // Respecting user rule for external command timeouts, but using a larger window for large wheels
                 std::string dl_cmd = std::format("timeout 300 curl -f -L --connect-timeout 10 --max-time 240 -s {} {} -o {}", 
                     quiet ? "" : "-#", quote_arg(info.wheel_url), quote_arg(partial.string()));
-                if (std::system(dl_cmd.c_str()) == 0 && fs::exists(partial) && fs::file_size(partial) > 0) {
+                if (run_shell(dl_cmd.c_str()) == 0 && fs::exists(partial) && fs::file_size(partial) > 0) {
                     std::error_code ec;
                     fs::rename(partial, temp_wheel, ec);
                 } else if (fs::exists(partial)) {
@@ -1169,7 +1174,7 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         std::string extract_cmd = std::format("{} {} {} {}", 
             quote_arg(python_bin.string()), quote_arg(extraction_helper.string()), 
             quote_arg(temp_wheel.string()), quote_arg(site_packages.string()));
-        int ret = std::system(extract_cmd.c_str());
+        int ret = run_shell(extract_cmd.c_str());
         
         if (ret != 0) {
             std::cerr << YELLOW << "⚠️ Extraction failed for " << name << ". Wheel might be corrupt. Deleting and retrying hardened download..." << RESET << std::endl;
@@ -1177,10 +1182,10 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
             
             // Retry hardened download once
             std::string dl_cmd = std::format("timeout 300 curl -f -L --connect-timeout 10 --max-time 240 -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(temp_wheel.string()));
-            int dl_ret = std::system(dl_cmd.c_str());
+            int dl_ret = run_shell(dl_cmd.c_str());
             
             if (dl_ret == 0 && fs::exists(temp_wheel)) {
-                ret = std::system(extract_cmd.c_str());
+                ret = run_shell(extract_cmd.c_str());
             }
             
             if (ret != 0) {
@@ -1403,16 +1408,16 @@ void run_package_tests(const Config& cfg, const std::string& pkg) {
     fs::path python_bin = cfg.project_env_path / "bin" / "python";
     // Check if pytest is installed using a quick python check
     std::string pytest_check = std::format("{} -c \"import importlib.util; exit(0 if importlib.util.find_spec('pytest') else 1)\"", quote_arg(python_bin.string()));
-    if (std::system(pytest_check.c_str()) != 0) {
+    if (run_shell(pytest_check.c_str()) != 0) {
         std::cout << BLUE << "📦 Installing pytest for testing..." << RESET << std::endl;
         std::string install_pytest = std::format("{} -m pip install pytest", quote_arg(python_bin.string()));
-        std::system(install_pytest.c_str());
+        run_shell(install_pytest.c_str());
         std::cout << GREEN << "✔️  pytest installed." << RESET << std::endl;
     }
 
     std::cout << GREEN << "🚀 Running tests..." << RESET << std::endl;
     std::string test_cmd = std::format("{} -m pytest {}", quote_arg(python_bin.string()), quote_arg(pkg_path.string()));
-    std::system(test_cmd.c_str());
+    run_shell(test_cmd.c_str());
 }
 
 void run_all_package_tests(const Config& cfg) {
@@ -1481,7 +1486,7 @@ void boot_environment(const Config& cfg, const std::string& script_path) {
     );
 
     std::cout << CYAN << "QEMU Command: " << qemu_cmd << RESET << std::endl;
-    std::system(qemu_cmd.c_str());
+    run_shell(qemu_cmd.c_str());
 }
 
 void freeze_environment(const Config& cfg, const std::string& output_file) {
@@ -1502,7 +1507,7 @@ void freeze_environment(const Config& cfg, const std::string& output_file) {
     std::string tar_cmd = std::format("tar -czf \"{}\" -C \"{}\" . -C \"{}\" pyvenv.cfg", 
         output_file, site_packages.string(), cfg.project_env_path.string());
     
-    int ret = std::system(tar_cmd.c_str());
+    int ret = run_shell(tar_cmd.c_str());
     if (ret == 0) {
         std::cout << GREEN << "✨ Environment frozen successfully!" << RESET << std::endl;
     } else {
@@ -1528,7 +1533,7 @@ void audit_environment(const Config& cfg) {
     std::string audit_cmd = std::format("\"{}\" \"{}\" \"{}\"", 
         python_bin.string(), helper_path.string(), site_packages.string());
     
-    std::system(audit_cmd.c_str());
+    run_shell(audit_cmd.c_str());
 }
 
 void review_code(const Config& cfg) {
@@ -1547,7 +1552,7 @@ void review_code(const Config& cfg) {
     std::string review_cmd = std::format("\"{}\" \"{}\" \"{}\" \"{}\"", 
         python_bin.string(), helper_path.string(), api_key, cfg.current_project.string());
     
-    std::system(review_cmd.c_str());
+    run_shell(review_cmd.c_str());
 }
 
 void verify_environment(const Config& cfg) {
@@ -1569,11 +1574,11 @@ void verify_environment(const Config& cfg) {
         quote_arg(python_bin.string()), quote_arg(helper_path.string()), 
         quote_arg(site_packages.string()), quote_arg((cfg.project_env_path / "bin").string()));
     
-    int ret = std::system(verify_cmd.c_str());
+    int ret = run_shell(verify_cmd.c_str());
     if (ret != 0) {
         std::cout << RED << "❌ VERIFICATION FAILED: Syntax errors detected in installed packages!" << RESET << std::endl;
         std::cout << YELLOW << "⚠️ Reverting environment state..." << RESET << std::endl;
-        std::system(std::format("cd \"{}\" && git reset --hard HEAD^", cfg.project_env_path.string()).c_str());
+        run_shell(std::format("cd \"{}\" && git reset --hard HEAD^", cfg.project_env_path.string()).c_str());
         std::exit(1);
     } else {
         std::cout << GREEN << "✨ Verification complete. No syntax errors found." << RESET << std::endl;
@@ -1594,7 +1599,7 @@ void trim_environment(const Config& cfg, const std::string& script_path) {
     
     std::string branch_cmd = std::format("cd \"{}\" && git checkout -b \"{}\"", 
         cfg.project_env_path.string(), trim_branch);
-    std::system(branch_cmd.c_str());
+    run_shell(branch_cmd.c_str());
 
     // Discovery helper script
     fs::path helper_path = cfg.spip_root / "scripts" / "trim_helper.py";
@@ -1661,7 +1666,7 @@ void trim_environment(const Config& cfg, const std::string& script_path) {
     
     std::string test_cmd = std::format("cd {} && ../spip run python {}", 
         quote_arg(cfg.current_project.string()), quote_arg(script_path));
-    int ret = std::system(test_cmd.c_str());
+    int ret = run_shell(test_cmd.c_str());
 
     if (ret == 0) {
         std::cout << GREEN << "✨ Trim successful! Test passed." << RESET << std::endl;
@@ -1669,7 +1674,7 @@ void trim_environment(const Config& cfg, const std::string& script_path) {
     } else {
         std::cout << RED << "❌ Trim failed! Test did not pass. Reverting to previous state..." << RESET << std::endl;
         std::string revert_cmd = std::format("cd \"{}\" && git checkout -", cfg.project_env_path.string());
-        std::system(revert_cmd.c_str());
+        run_shell(revert_cmd.c_str());
     }
 }
 
@@ -1742,7 +1747,7 @@ int benchmark_concurrency(const Config& cfg) {
             workers.emplace_back([&, i]() {
                 // Strict 4s timeout as per rule 0
                 std::string cmd = std::format("timeout -s 9 4s curl -L -s {} -o {}_{}", test_url, tmp.string(), i);
-                std::system(cmd.c_str());
+                run_shell(cmd.c_str());
             });
         }
         for (auto& t : workers) t.join();
@@ -1800,7 +1805,7 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
             fs::path partial = target.string() + ".part." + std::to_string(getpid());
             // Wrap in timeout to prevent stall on dead connections
             std::string cmd = std::format("timeout 300 curl -f -L --connect-timeout 10 --max-time 240 -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(partial.string()));
-            int ret = std::system(cmd.c_str());
+            int ret = run_shell(cmd.c_str());
             
             if (!g_interrupted && ret == 0 && fs::exists(partial) && fs::file_size(partial) > 0) {
                 std::error_code ec;
@@ -2074,11 +2079,11 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     // Git Storage for Wheels (User Request)
     if (!info_list.empty()) {
         std::string wheels_branch = "wheels";
-        if (branch_exists(cfg, wheels_branch) || std::system(std::format("cd {} && git branch {}", quote_arg(cfg.repo_path.string()), wheels_branch).c_str()) == 0) {
+        if (branch_exists(cfg, wheels_branch) || run_shell(std::format("cd {} && git branch {}", quote_arg(cfg.repo_path.string()), wheels_branch).c_str()) == 0) {
              // Create a specific worktree for wheels if not exists
              fs::path wheel_wt = cfg.spip_root / "wheels_wt";
              if (!fs::exists(wheel_wt)) {
-                 std::system(std::format("cd {} && git worktree add --detach {} {}", quote_arg(cfg.repo_path.string()), quote_arg(wheel_wt.string()), wheels_branch).c_str());
+                 run_shell(std::format("cd {} && git worktree add --detach {} {}", quote_arg(cfg.repo_path.string()), quote_arg(wheel_wt.string()), wheels_branch).c_str());
              }
              
              // Copy wheels
@@ -2089,7 +2094,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                  }
              }
              // Commit
-             std::system(std::format("cd {} && git add . && git commit -m 'Add wheels' --quiet", quote_arg(wheel_wt.string())).c_str());
+             run_shell(std::format("cd {} && git add . && git commit -m 'Add wheels' --quiet", quote_arg(wheel_wt.string())).c_str());
         }
     }
 
@@ -2246,17 +2251,17 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                     std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
                          quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
                          
-                    if (std::system(wt_cmd.c_str()) != 0) {
+                    if (run_shell(wt_cmd.c_str()) != 0) {
                          // Explicitly remove existing registration if "already exists" error occurred
                          std::string rm_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", 
                              quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()));
-                         std::system(rm_cmd.c_str());
-                         std::system(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
+                         run_shell(rm_cmd.c_str());
+                         run_shell(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
                          
                          // Retry
                          std::error_code ec_retry;
                          if (fs::exists(matrix_path, ec_retry)) fs::remove_all(matrix_path, ec_retry);
-                         if (std::system(wt_cmd.c_str()) != 0) {
+                         if (run_shell(wt_cmd.c_str()) != 0) {
                              g_git_sem.release();
                              throw std::runtime_error("Failed to add git worktree even after cleanup.");
                          }
@@ -2338,8 +2343,8 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             fs::path python_bin = matrix_path / "bin" / "python";
             // Simple package test run
             std::string test_cmd = std::format("{} -m pytest --version >/dev/null 2>&1", quote_arg(python_bin.string()));
-            if (std::system(test_cmd.c_str()) != 0) {
-                 std::system(std::format("{} -m pip install pytest >/dev/null 2>&1", quote_arg(python_bin.string())).c_str());
+            if (run_shell(test_cmd.c_str()) != 0) {
+                 run_shell(std::format("{} -m pip install pytest >/dev/null 2>&1", quote_arg(python_bin.string())).c_str());
             }
             
             // Try to find package dir for tests
@@ -2359,7 +2364,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                      
                      // Helper lambda to run clean sys for final result check
                      auto run_final = [&]() {
-                         return std::system(pytest_cmd.c_str()) == 0;
+                         return run_shell(pytest_cmd.c_str()) == 0;
                      };
 
                       // Knowledge Base Lookup
@@ -2593,7 +2598,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         if (!no_cleanup) {
              g_git_sem.acquire();
              std::string rm_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()));
-             std::system(rm_cmd.c_str());
+             run_shell(rm_cmd.c_str());
              g_git_sem.release();
         }
             } catch (const std::exception& e) {
@@ -2615,7 +2620,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     // Global cleanup
     if (!no_cleanup) {
         std::cout << MAGENTA << "🧹 Pruning worktree metadata..." << RESET << std::endl;
-        std::system(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
+        run_shell(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
     } else {
         std::cout << BLUE << "ℹ️ Skipping final cleanup (reusable worktree preserved)." << RESET << std::endl;
     }
@@ -2651,7 +2656,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         fs::path src_sum = fs::current_path() / "scripts" / "summarize_errors.py";
         if (fs::exists(src_sum)) fs::copy_file(src_sum, summary_script, fs::copy_options::overwrite_existing);
 
-        std::system(std::format("python3 {} {}", quote_arg(summary_script.string()), quote_arg(log_json.string())).c_str());
+        run_shell(std::format("python3 {} {}", quote_arg(summary_script.string()), quote_arg(log_json.string())).c_str());
     }
 
     std::cout << "\n" << BOLD << MAGENTA << "🏁 Matrix Test Summary for " << pkg << RESET << std::endl;
@@ -2880,17 +2885,17 @@ void bundle_package(const Config& cfg, const std::string& path) {
     
     // Ensure pip is installed
     std::string check_pip = std::format("{} -m pip --version >/dev/null 2>&1", quote_arg(python_bin.string()));
-    if (std::system(check_pip.c_str()) != 0) {
+    if (run_shell(check_pip.c_str()) != 0) {
         std::cout << YELLOW << "⚠️ pip not found. Installing via ensurepip..." << RESET << std::endl;
         std::string install_pip = std::format("{} -m ensurepip --upgrade", quote_arg(python_bin.string()));
-        std::system(install_pip.c_str());
+        run_shell(install_pip.c_str());
     }
 
     std::cout << BLUE << "🚀 Installing package..." << RESET << std::endl;
     std::string install_cmd = std::format("cd {} && {} -m pip install .", 
         quote_arg(target_dir.string()), quote_arg(python_bin.string()));
     
-    int ret = std::system(install_cmd.c_str());
+    int ret = run_shell(install_cmd.c_str());
     if (ret != 0) {
         std::cerr << RED << "❌ Installation failed." << RESET << std::endl;
         return;
@@ -2910,7 +2915,7 @@ void bundle_package(const Config& cfg, const std::string& path) {
         std::cout << MAGENTA << "🧪 Running test: " << test_file << "..." << RESET << std::endl;
         std::string test_cmd = std::format("cd {} && {} {}", 
             quote_arg(target_dir.string()), quote_arg(python_bin.string()), quote_arg(test_file));
-        std::system(test_cmd.c_str());
+        run_shell(test_cmd.c_str());
     } else {
         std::cout << YELLOW << "⚠️ No test file found (looked for *test*.py)." << RESET << std::endl;
     }
@@ -2996,12 +3001,12 @@ void cleanup_spip(Config& cfg, bool remove_all = false) {
                     // Remove worktree
                     std::string wt_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", 
                         quote_arg(cfg.repo_path.string()), quote_arg(entry.path().string()));
-                    std::system(wt_cmd.c_str());
+                    run_shell(wt_cmd.c_str());
 
                     // Remove branch
                     std::string br_cmd = std::format("cd {} && git branch -D project/{} 2>/dev/null", 
                         quote_arg(cfg.repo_path.string()), quote_arg(hash));
-                    std::system(br_cmd.c_str());
+                    run_shell(br_cmd.c_str());
 
                     // Ensure directory is gone
                     if (fs::exists(entry.path())) {
@@ -3059,14 +3064,14 @@ void cleanup_spip(Config& cfg, bool remove_all = false) {
         // 3. Compact Git Repo
         std::cout << MAGENTA << "📦 Compacting main repository (git gc)..." << RESET << std::endl;
         std::string gc_cmd = std::format("cd {} && git gc --prune=now --aggressive", quote_arg(cfg.repo_path.string()));
-        std::system(gc_cmd.c_str());
+        run_shell(gc_cmd.c_str());
 
         // 4. Compact DB Repo
         fs::path db_path = cfg.spip_root / "db";
         if (fs::exists(db_path)) {
             std::cout << MAGENTA << "📦 Compacting database repository (git gc)..." << RESET << std::endl;
             std::string db_gc_cmd = std::format("cd {} && git gc --prune=now --aggressive", quote_arg(db_path.string()));
-            std::system(db_gc_cmd.c_str());
+            run_shell(db_gc_cmd.c_str());
         }
         
         // Update last GC time
@@ -3276,7 +3281,7 @@ void profile_package(const Config& cfg, const std::string& pkg, bool ai_review =
             fs::path reviewer = cfg.spip_root / "scripts" / "profile_ai_review.py";
             std::string ai_cmd = std::format("python3 {} {} {} {}", 
                 quote_arg(reviewer.string()), quote_arg(api_key), quote_arg(pkg), quote_arg(tmp_stats.string()));
-            std::system(ai_cmd.c_str());
+            run_shell(ai_cmd.c_str());
             fs::remove(tmp_stats);
         }
     }
@@ -3450,7 +3455,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         std::cout << std::endl << GREEN << "✔ Fetch complete. Committing to Git..." << RESET << std::endl;
         std::string git_cmd = std::format("cd {} && git add packages && git commit -m \"Update package database\"", 
             quote_arg(cfg.repo_path.parent_path().string() + "/db"));
-        std::system(git_cmd.c_str());
+        run_shell(git_cmd.c_str());
     }
     else if (command == "top") {
         std::string sort_order = "downloads"; // Default
@@ -3535,7 +3540,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
             quote_arg(python_bin.string()), quote_arg(agent_path.string()), 
             quote_arg(name), quote_arg(desc), quote_arg(ollama_model));
         
-        std::system(run_cmd.c_str());
+        run_shell(run_cmd.c_str());
     }
     else if (command == "use") {
         if (args.size() < 2) { std::cerr << "Usage: spip use <version>" << std::endl; return; }
@@ -3543,10 +3548,10 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         if (fs::exists(cfg.project_env_path)) {
             std::string rm_cmd = std::format("cd {} && git worktree remove {} --force", 
                 quote_arg(cfg.repo_path.string()), quote_arg(cfg.project_env_path.string()));
-            std::system(rm_cmd.c_str());
+            run_shell(rm_cmd.c_str());
             std::string del_branch = std::format("cd {} && git branch -D project/{}", 
                 quote_arg(cfg.repo_path.string()), cfg.project_hash);
-            std::system(del_branch.c_str());
+            run_shell(del_branch.c_str());
         }
         setup_project_env(cfg, version);
         std::cout << GREEN << "✔ Project now using Python " << version << RESET << std::endl;
@@ -3554,7 +3559,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
     else if (command == "log") {
         setup_project_env(cfg);
         std::string cmd = std::format("cd {} && git log --oneline --graph", quote_arg(cfg.project_env_path.string()));
-        std::system(cmd.c_str());
+        run_shell(cmd.c_str());
     }
     else if (command == "run") {
         setup_project_env(cfg);
@@ -3563,7 +3568,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         std::string cmd = "";
         for (size_t i = 1; i < args.size(); ++i) cmd += quote_arg(args[i]) + " ";
         std::string full_cmd = path_env + " " + cmd;
-        std::system(full_cmd.c_str());
+        run_shell(full_cmd.c_str());
     }
     else if (command == "shell") {
         setup_project_env(cfg);
@@ -3572,7 +3577,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         std::string env_vars = std::format("VIRTUAL_ENV={} PATH={}:{}", 
             quote_arg(cfg.project_env_path.string()), quote_arg(bin_path.string()), quote_arg(std::getenv("PATH")));
         std::string full_cmd = env_vars + " " + shell;
-        std::system(full_cmd.c_str());
+        run_shell(full_cmd.c_str());
     }
     else if (command == "search") {
         if (args.size() < 2) {
@@ -3811,7 +3816,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         show_usage_stats(cfg);
         std::cout << BOLD << "Managed Environment Branches:" << RESET << std::endl;
         std::string cmd = std::format("cd \"{}\" && git branch", cfg.repo_path.string());
-        std::system(cmd.c_str());
+        run_shell(cmd.c_str());
     }
     else if (command == "cleanup" || command == "gc") {
         bool remove_all = (args.size() > 1 && args[1] == "--all");
