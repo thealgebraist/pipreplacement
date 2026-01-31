@@ -672,12 +672,17 @@ void create_base_version(const Config& cfg, const std::string& version) {
         std::exit(1);
     }
 
-    // Git command: Handle master vs main
+    // Git command: Handle CI environments where master/main might not exist or be detached
+    std::string current_branch_cmd = "git symbolic-ref --short HEAD 2>/dev/null || echo HEAD";
+    std::string current_branch = get_exec_output(std::format("cd {} && {}", quote_arg(cfg.repo_path.string()), current_branch_cmd));
+    if (current_branch.empty()) current_branch = "main"; // ultimate fallback
+    else if (current_branch.find('\n') != std::string::npos) current_branch = current_branch.substr(0, current_branch.find('\n'));
+
     std::string git_cmd = std::format(
-        "cd \"{}\" && (git checkout master || git checkout main) && git checkout -b \"{}\" && "
+        "cd \"{}\" && git checkout -b \"{}\" && "
         "rm -rf * && cp -r \"{}/\"* . && git add -A && git commit -m \"Base Python {}\" && "
-        "(git checkout master || git checkout main)",
-        cfg.repo_path.string(), branch, temp_venv.string(), version
+        "git checkout {}",
+        cfg.repo_path.string(), branch, temp_venv.string(), version, current_branch
     );
     
     if (std::system(git_cmd.c_str()) != 0) {
@@ -3701,7 +3706,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         m_cfg.telemetry = telemetry;
         // Default to hardware_concurrency if not overridden
         for (size_t i = 1; i < args.size(); ++i) {
-             if ((args[i] == "--threads" || args[i] == "-j") && i + 1 < args.size()) {
+             if ((args[i] == "--threads" || args[i] == "-j" || args[i] == "--concurrency") && i + 1 < args.size()) {
                  m_cfg.concurrency = std::stoi(args[++i]);
              }
         }

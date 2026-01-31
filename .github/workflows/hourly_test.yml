@@ -21,6 +21,9 @@ jobs:
 
       - name: Build spip
         run: |
+          # Set git config for base version commits
+          git config --global user.email "bot@spip.dev"
+          git config --global user.name "SPIP Bot"
           ninja spip
 
       - name: Pick 4 random top packages
@@ -35,13 +38,18 @@ jobs:
           pkgs="${{ steps.pick-pkgs.outputs.pkgs }}"
           echo "Starting 10 minute stress test on: $pkgs"
           
+          # Ensure telemetry dir exists
+          mkdir -p ${HOME}/.spip/telemetry
+          
           # Use timeout to ensure we stay within 10 minutes total
+          # Use --threads instead of --concurrency for safety (added support for both now)
+          # Use SPIP_NO_TMPFS=1 to avoid sudo mount issues in CI
+          export SPIP_NO_TMPFS=1
           timeout 10m bash -c "
             for pkg in $pkgs; do
               echo '----------------------------------------'
-              echo '🧪 Testing: \$pkg'
-              # limit to 2 versions per pkg to ensure we finish 4 pkgs in 10m
-              ./spip matrix \$pkg --limit 2 --concurrency 4
+              echo '🧪 Testing: $pkg'
+              ./spip matrix \$pkg --limit 2 --threads 4 --telemetry
             done
           " || echo "Test reached 10 minute timeout"
 
@@ -50,5 +58,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: telemetry-logs
-          path: ~/.spip/telemetry/*.db
+          path: /home/runner/.spip/telemetry/*.db
           if-no-files-found: ignore
