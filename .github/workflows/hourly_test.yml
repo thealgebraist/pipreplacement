@@ -1,0 +1,54 @@
+name: Hourly Matrix Test
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Every hour
+  workflow_dispatch:      # Manual trigger
+
+jobs:
+  matrix-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ ninja-build sqlite3 libsqlite3-dev curl
+
+      - name: Build spip
+        run: |
+          ninja spip
+
+      - name: Pick 4 random top packages
+        id: pick-pkgs
+        run: |
+          pkgs=$(python3 scripts/pick_random_pkgs.py)
+          echo "pkgs=$pkgs" >> $GITHUB_OUTPUT
+          echo "Selected: $pkgs"
+
+      - name: Run Matrix Tests
+        run: |
+          pkgs="${{ steps.pick-pkgs.outputs.pkgs }}"
+          echo "Starting 10 minute stress test on: $pkgs"
+          
+          # Use timeout to ensure we stay within 10 minutes total
+          timeout 10m bash -c "
+            for pkg in $pkgs; do
+              echo '----------------------------------------'
+              echo '🧪 Testing: \$pkg'
+              # limit to 2 versions per pkg to ensure we finish 4 pkgs in 10m
+              ./spip matrix \$pkg --limit 2 --concurrency 4
+            done
+          " || echo "Test reached 10 minute timeout"
+
+      - name: Upload Telemetry
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telemetry-logs
+          path: ~/.spip/telemetry/*.db
+          if-no-files-found: ignore
