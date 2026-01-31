@@ -16,6 +16,7 @@
 #include <set>
 #include <map>
 #include <chrono>
+#include <string_view>
 #include <sys/resource.h>
 #include <csignal>
 #include <sqlite3.h>
@@ -242,7 +243,8 @@ void ensure_scripts(const Config& cfg) {
     // If not found in project scripts/, we don't overwrite if they exist in spip_root/scripts.
     std::vector<std::string> script_names = {
         "safe_extract.py", "audit_helper.py", "review_helper.py", 
-        "verify_helper.py", "trim_helper.py", "agent_helper.py"
+        "verify_helper.py", "trim_helper.py", "agent_helper.py",
+        "pyc_profiler.py", "profile_ai_review.py"
     };
     
     fs::path project_scripts = fs::current_path() / "scripts";
@@ -555,13 +557,9 @@ std::vector<std::string> get_all_versions(const std::string& pkg) {
     }
     
     // Semantic sort
-    std::sort(versions.begin(), versions.end(), [](const std::string& a, const std::string& b) {
+    std::stable_sort(versions.begin(), versions.end(), [](const std::string& a, const std::string& b) {
         // Very basic semantic version comparison
-        // Split by .
-        // ...
-        // For now string compare is okayish if same length, but bad for "1.10" vs "1.2".
-        // Let's implement a tiny helper lambda
-        auto split = [](const std::string& s) {
+        auto parse_ver = [](std::string_view s) {
             std::vector<int> parts;
             std::string part;
             for (char c : s) {
@@ -571,7 +569,7 @@ std::vector<std::string> get_all_versions(const std::string& pkg) {
             if (!part.empty()) parts.push_back(std::stoi(part));
             return parts;
         };
-        return split(a) < split(b);
+        return parse_ver(a) < parse_ver(b);
     });
 
     return versions;
@@ -672,7 +670,7 @@ PackageInfo get_package_info(const std::string& pkg, const std::string& version 
         size_t ver_entry = content.find(ver_key, rel_pos);
         if (ver_entry != std::string::npos) {
             size_t open_bracket = content.find("[", ver_entry);
-            size_t close_bracket = content.find("]", open_bracket);
+            size_t close_bracket = std::string::npos;
             // Search for next version key to ensure we don't overrun (approximate)
             // or just find matching bracket. Finding matching bracket in C++ without counter is basic but risky if nested (unlikely for release list).
             // Using a simple counter for bracket matching would be safer 
@@ -1560,7 +1558,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     std::cout << MAGENTA << "⚡ Parallel execution with " << max_threads << " threads." << RESET << std::endl;
     
     std::atomic<size_t> g_idx{0};
-    std::mutex m_out, m_res, m_state;
+    std::mutex m_out, m_res, m_state, m_base_sync;
     std::vector<std::thread> workers;
     ErrorKnowledgeBase kb(cfg.db_file);
     
@@ -1604,10 +1602,19 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         std::string base_branch = "base/" + target_py;
         
         // Sync base branch creation
+        bool exists = false;
         {
-            std::lock_guard<std::mutex> l(m_out);
-            if (!branch_exists(cfg, base_branch)) {
+            std::lock_guard<std::mutex> l(m_base_sync);
+            exists = branch_exists(cfg, base_branch);
+        }
+        
+        if (!exists) {
+            {
+                std::lock_guard<std::mutex> l(m_out);
                 std::cout << YELLOW << "⚠️ Base version " << target_py << " not found. Attempting to bootstrap..." << RESET << std::endl;
+            }
+            std::lock_guard<std::mutex> l(m_base_sync);
+            if (!branch_exists(cfg, base_branch)) {
                 create_base_version(cfg, target_py);
             }
         }
@@ -2404,11 +2411,216 @@ void cleanup_spip(Config& cfg, bool remove_all = false) {
     show_usage_stats(cfg);
 }
 
+void profile_package(const Config& cfg, const std::string& pkg, bool ai_review = false) {
+    std::cout << MAGENTA << "📊 Profiling bytecode for package: " << BOLD << pkg << RESET << std::endl;
+    
+    // Find package in site-packages
+    fs::path sp = get_site_packages(cfg);
+    if (sp.empty()) {
+        std::cerr << RED << "❌ No environment found. Run 'spip install <package>' first." << RESET << std::endl;
+        return;
+    }
+    
+    std::string pkg_lower = pkg;
+    std::transform(pkg_lower.begin(), pkg_lower.end(), pkg_lower.begin(), ::tolower);
+    std::string pkg_normalized = pkg_lower;
+    std::replace(pkg_normalized.begin(), pkg_normalized.end(), '-', '_');
+    
+    fs::path pkg_path = sp / pkg_normalized;
+    if (!fs::exists(pkg_path)) {
+        pkg_path = sp / pkg_lower;
+    }
+    
+    if (!fs::exists(pkg_path)) {
+        std::cerr << RED << "❌ Package '" << pkg << "' not found in environment." << RESET << std::endl;
+        std::cout << YELLOW << "💡 Available packages in site-packages:" << RESET << std::endl;
+        int count = 0;
+        for (const auto& entry : fs::directory_iterator(sp)) {
+            if (entry.is_directory() && count++ < 20) {
+                std::cout << "  - " << entry.path().filename().string() << std::endl;
+            }
+        }
+        return;
+    }
+    
+    // Run profiler script
+    fs::path profiler = cfg.spip_root / "scripts" / "pyc_profiler.py";
+    if (!fs::exists(profiler)) {
+        std::cerr << RED << "❌ Profiler script not found: " << profiler << RESET << std::endl;
+        return;
+    }
+    
+    std::string cmd = std::format("python3 {} {}", quote_arg(profiler.string()), quote_arg(pkg_path.string()));
+    std::string output = get_exec_output(cmd);
+    
+    // Parse JSON output
+    if (output.find("{") == std::string::npos) {
+        std::cerr << RED << "❌ Profiler failed: " << output << RESET << std::endl;
+        return;
+    }
+    
+    // Extract key metrics from JSON
+    auto extract_number = [&](const std::string& key) -> long {
+        size_t pos = output.find("\"" + key + "\":");
+        if (pos == std::string::npos) return 0;
+        size_t start = output.find_first_of("0123456789", pos);
+        if (start == std::string::npos) return 0;
+        size_t end = output.find_first_not_of("0123456789", start);
+        try {
+            return std::stol(output.substr(start, end - start));
+        } catch (...) {
+            return 0;
+        }
+    };
+    
+    long files = extract_number("files");
+    long total_disk = extract_number("total_disk");
+    long total_memory = extract_number("total_memory");
+    long total_instructions = extract_number("total_instructions");
+    long total_loops = extract_number("total_loops");
+    long total_branches = extract_number("total_branches");
+    long total_calls = extract_number("total_calls");
+    
+    // Display results
+    std::cout << "\n" << BOLD << BLUE << "📦 Package: " << pkg << RESET << std::endl;
+    std::cout << std::string(60, '=') << std::endl;
+    
+    std::cout << std::format("{:<30} {:>15}", "Total .pyc files:", files) << std::endl;
+    std::cout << std::format("{:<30} {:>12} KB", "Total disk usage:", total_disk / 1024) << std::endl;
+    std::cout << std::format("{:<30} {:>12} KB", "Estimated memory footprint:", total_memory / 1024) << std::endl;
+    
+    std::cout << "\n" << BOLD << "Bytecode Complexity Metrics:" << RESET << std::endl;
+    std::cout << std::format("{:<30} {:>15}", "Total instructions:", total_instructions) << std::endl;
+    std::cout << std::format("{:<30} {:>15}", "Loop constructs:", total_loops) << std::endl;
+    std::cout << std::format("{:<30} {:>15}", "Branch points:", total_branches) << std::endl;
+    std::cout << std::format("{:<30} {:>15}", "Function calls:", total_calls) << std::endl;
+    
+    if (total_instructions > 0) {
+        double complexity_factor = (double)(total_loops + total_branches) / total_instructions * 100;
+        std::cout << std::format("{:<30} {:>14.2f}%", "Complexity factor:", complexity_factor) << std::endl;
+    }
+
+    // Static Vulnerabilities Analysis
+    std::cout << "\n" << BOLD << MAGENTA << "🏛️ Static Function Analysis (Singletons/Caching):" << RESET << std::endl;
+    auto extract_vuln = [&](const std::string& key) -> long {
+        size_t pos = output.find("\"" + key + "\":");
+        if (pos == std::string::npos) return 0;
+        size_t start = output.find_first_of("0123456789", pos + key.length() + 3);
+        size_t end = output.find_first_not_of("0123456789", start);
+        return std::stol(output.substr(start, end - start));
+    };
+
+    long v1 = extract_vuln("method1_closure_free");
+    long v2 = extract_vuln("method2_repeated_make");
+    long v3 = extract_vuln("method3_const_calls");
+    long v4 = extract_vuln("method4_purity_checks");
+
+    std::cout << std::format("  {:<40} {:>10}", "Method 1: Closure-free nested defs:", v1) << std::endl;
+    std::cout << std::format("  {:<40} {:>10}", "Method 2: Redundant MAKE_FUNCTION:", v2) << std::endl;
+    std::cout << std::format("  {:<40} {:>10}", "Method 3: Constant argument calls:", v3) << std::endl;
+    std::cout << std::format("  {:<40} {:>10}", "Method 4: Potential pure singletons:", v4) << std::endl;
+    
+    // Show top 32 most complex files
+    std::cout << "\n" << BOLD << YELLOW << "🔥 Resource Hotspots (Top 32):" << RESET << std::endl;
+    size_t detail_start = output.find("\"files_detail\":");
+    if (detail_start != std::string::npos) {
+        // Simple regex-free extraction of file details
+        size_t arr_start = output.find("[", detail_start);
+        size_t arr_end = output.find("]", arr_start);
+        if (arr_start != std::string::npos && arr_end != std::string::npos) {
+            std::string details = output.substr(arr_start + 1, arr_end - arr_start - 1);
+            
+            // Extract up to 32 file entries
+            int count = 0;
+            size_t pos = 0;
+            while (count < 32 && (pos = details.find("\"path\":", pos)) != std::string::npos) {
+                size_t obj_start = details.find_last_of("{", pos);
+                size_t obj_end = details.find("}", pos);
+                if (obj_end == std::string::npos) break;
+                
+                std::string obj = details.substr(obj_start, obj_end - obj_start + 1);
+                
+                // Extract path
+                size_t p_key = obj.find("\"path\"");
+                size_t path_start = obj.find("\"", p_key + 6);
+                while (path_start != std::string::npos && obj[path_start] != '\"') path_start++;
+                path_start++; // skip quote
+                size_t path_end = obj.find("\"", path_start);
+                std::string path = obj.substr(path_start, path_end - path_start);
+                
+                // Extract instructions
+                size_t instr_key = obj.find("\"instructions\"");
+                size_t instr_start = obj.find_first_of("0123456789", instr_key);
+                size_t instr_end = obj.find_first_not_of("0123456789", instr_start);
+                long instructions = std::stol(obj.substr(instr_start, instr_end - instr_start));
+                
+                // Show only filename
+                fs::path p(path);
+                std::cout << std::format("  {:<5} {:<50} {:>10} inst", count + 1, p.filename().string(), instructions) << std::endl;
+                
+                pos = obj_end + 1;
+                count++;
+            }
+        }
+    }
+
+    // Show top redundant patterns
+    std::cout << "\n" << BOLD << CYAN << "🔄 Redundant Constant Patterns (Top 10):" << RESET << std::endl;
+    size_t pat_start = output.find("\"redundant_patterns\":");
+    if (pat_start != std::string::npos) {
+        size_t obj_start = output.find("{", pat_start);
+        size_t obj_end = output.find("}", obj_start);
+        if (obj_start != std::string::npos && obj_end != std::string::npos) {
+            std::string patterns = output.substr(obj_start + 1, obj_end - obj_start - 1);
+            int count = 0;
+            size_t pos = 0;
+            while (count < 10 && (pos = patterns.find("\"", pos)) != std::string::npos) {
+                size_t key_end = patterns.find("\"", pos + 1);
+                if (key_end == std::string::npos) break;
+                std::string pattern = patterns.substr(pos + 1, key_end - pos - 1);
+                
+                size_t val_start = patterns.find(":", key_end) + 1;
+                while (val_start < patterns.size() && (patterns[val_start] == ' ' || patterns[val_start] == '\n')) val_start++;
+                size_t val_end = patterns.find_first_of(",\n}", val_start);
+                std::string val_str = patterns.substr(val_start, val_end - val_start);
+                
+                std::cout << std::format("  {:<60} {:>8} occurrences", pattern, val_str) << std::endl;
+                
+                pos = patterns.find(",", val_start);
+                if (pos == std::string::npos) break;
+                count++;
+            }
+        }
+    }
+    
+    if (ai_review) {
+        const char* api_key = std::getenv("GEMINI_API_KEY");
+        if (!api_key) {
+            std::cout << YELLOW << "\n⚠️ GEMINI_API_KEY not set. Skipping AI review." << RESET << std::endl;
+        } else {
+            std::cout << CYAN << "\n🤖 Requesting AI Resource Optimization Review..." << RESET << std::endl;
+            fs::path tmp_stats = fs::temp_directory_path() / "spip_profile_stats.json";
+            std::ofstream ofs(tmp_stats);
+            ofs << output;
+            ofs.close();
+            
+            fs::path reviewer = cfg.spip_root / "scripts" / "profile_ai_review.py";
+            std::string ai_cmd = std::format("python3 {} {} {} {}", 
+                quote_arg(reviewer.string()), quote_arg(api_key), quote_arg(pkg), quote_arg(tmp_stats.string()));
+            std::system(ai_cmd.c_str());
+            fs::remove(tmp_stats);
+        }
+    }
+    
+    std::cout << std::endl;
+}
+
 void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
-        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle|matrix> [args...]" << std::endl;
+        std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle|matrix|profile> [args...]" << std::endl;
         std::cout << "  cleanup|gc [--all] - Perform maintenance, optionally remove all environments" << std::endl;
         std::cout << "  matrix <pkg> [--python version] [--profile] [--no-cleanup] [test.py] - Build-server mode: test all versions of a package" << std::endl;
+        std::cout << "  profile <pkg> - Profile bytecode complexity, memory, and disk usage for an installed package" << std::endl;
         return;
     }
     std::string command = args[0];
@@ -2700,6 +2912,21 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         }
         
         matrix_test(cfg, pkg, test_script, python_ver, profile, no_cleanup, revision_limit, test_all_revisions);
+    }
+    else if (command == "profile") {
+        if (!require_args(args, 2, "Usage: spip profile <pkg> [--ai|--review]")) return;
+        bool ai_review = false;
+        std::string pkg = "";
+        for (size_t i = 1; i < args.size(); ++i) {
+            if (args[i] == "--ai" || args[i] == "--review") ai_review = true;
+            else if (pkg.empty()) pkg = args[i];
+        }
+        if (pkg.empty()) {
+            std::cerr << "Error: Package name required." << std::endl;
+            return;
+        }
+        setup_project_env(cfg);
+        profile_package(cfg, pkg, ai_review);
     }
     else if (command == "list") {
         ensure_dirs(cfg);

@@ -45,3 +45,7 @@
 - [x] Large-scale 64-package matrix stress test (10 versions each) to achieve ultimate robustness.
 - [x] Implement 4s-burst resume logic for `spip matrix` to satisfy strict execution constraints.
 - [x] **SQLite Error Knowledge Base**: Persistent storage of exceptions and learned fixes for self-healing tests.
+- [x] **Bytecode Profiler (`spip profile`)**: Comprehensive .pyc analysis measuring disk usage, memory footprint, and cycle complexity.
+    - [x] **AI Resource Optimization**: `spip profile <pkg> --ai` uses Gemini to review the top 32 hotspots and suggest improvements to lower resource use.
+    - [x] **Redundancy Analysis**: Detects repeated constant subexpressions (e.g., BUILD_MAP, BUILD_TUPLE) and suggests singleton/static optimization.
+- [x] **Resource Hog Study**: Conducted a study of 64 top packages to identify common resource hogs. Generated a PDF report with architectural suggestions.
