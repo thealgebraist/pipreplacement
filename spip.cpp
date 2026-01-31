@@ -116,8 +116,9 @@ struct Config {
 		fs::path project_env_path;
         fs::path db_file;
 		std::string pypi_mirror = "https://pypi.org"; // Default
-        int concurrency = std::thread::hardware_concurrency(); 
-        bool telemetry = false;
+        int concurrency = std::thread::hardware_concurrency();
+    bool telemetry = false;
+    std::string worker_id = "worker_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 10000);
 };
 
 class ErrorKnowledgeBase {
@@ -213,9 +214,14 @@ public:
         : cfg(c), test_id(id), 
           last_user_vec(MAX_CORES, 0), last_sys_vec(MAX_CORES, 0), last_io_vec(MAX_CORES, 0) 
     {
-        fs::path db_path = cfg.spip_root / "telemetry.db";
+        // Split telemetry into its own run-specific DB to avoid global contention
+        fs::path db_dir = cfg.spip_root / "telemetry";
+        std::error_code ec;
+        if (!fs::exists(db_dir, ec)) fs::create_directories(db_dir, ec);
+        
+        fs::path db_path = db_dir / ("telemetry_" + test_id + ".db");
         if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
-            std::cerr << "❌ Failed to open telemetry database." << std::endl;
+            std::cerr << "❌ Failed to open telemetry database: " << db_path << std::endl;
             return;
         }
 
@@ -251,22 +257,32 @@ public:
 
 private:
     void loop() {
+        int batch_count = 0;
+        sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+        
         while (running) {
             auto start_time = std::chrono::steady_clock::now();
             sample();
+            batch_count++;
+            
+            // Batch transactions: flush every 5 seconds (50 samples at 10Hz)
+            if (batch_count >= 50) {
+                sqlite3_exec(db, "COMMIT; BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+                batch_count = 0;
+            }
+
             auto end_time = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
             if (elapsed < std::chrono::milliseconds(100)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100) - elapsed);
             }
         }
+        sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
     }
 
     void sample() {
         double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
         
-        sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
-
         #ifdef __APPLE__
         natural_t cpuCount;
         processor_info_array_t infoArray;
@@ -277,7 +293,6 @@ private:
             for (natural_t i = 0; i < cpuCount && i < MAX_CORES; ++i) {
                 uint64_t u = infoArray[i * CPU_STATE_MAX + CPU_STATE_USER];
                 uint64_t s = infoArray[i * CPU_STATE_MAX + CPU_STATE_SYSTEM];
-                uint64_t id = infoArray[i * CPU_STATE_MAX + CPU_STATE_IDLE];
                 
                 double du = (u > last_user_vec[i]) ? (double)(u - last_user_vec[i]) : 0;
                 double ds = (s > last_sys_vec[i]) ? (double)(s - last_sys_vec[i]) : 0;
@@ -366,8 +381,6 @@ private:
         log_to_db(ts, -2, 0, 0, 0, (long)(rb - last_net_in), (long)(tb - last_net_out), 0, 0, 0);
         last_net_in = rb; last_net_out = tb;
         #endif
-
-        sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
     }
 
     void log_to_db(double ts, int core, double u, double s, long mem, long ni, long no, long dr, long dw, double wait) {
@@ -478,9 +491,24 @@ void ensure_scripts(const Config& cfg) {
     }
 }
 
+void ensure_envs_tmpfs(const Config& cfg) {
+#ifdef __linux__
+    // Performance: mount envs_root as tmpfs for zero I/O wait during matrix tests
+    if (std::getenv("SPIP_NO_TMPFS")) return;
+    
+    std::string mount_check = std::format("mount | grep {}", quote_arg(cfg.envs_root.string()));
+    if (get_exec_output(mount_check).empty()) {
+        std::cout << MAGENTA << "🚀 Mounting " << cfg.envs_root << " as tmpfs for ultra-speed..." << RESET << std::endl;
+        std::string mount_cmd = std::format("sudo mount -t tmpfs -o size=2G tmpfs {}", quote_arg(cfg.envs_root.string()));
+        std::system(mount_cmd.c_str());
+    }
+#endif
+}
+
 void ensure_dirs(const Config& cfg) {
     if (!fs::exists(cfg.spip_root)) fs::create_directories(cfg.spip_root);
     if (!fs::exists(cfg.envs_root)) fs::create_directories(cfg.envs_root);
+    ensure_envs_tmpfs(cfg);
     ensure_scripts(cfg);
     if (!fs::exists(cfg.repo_path)) {
         std::cout << "Creating repo at: " << cfg.repo_path << std::endl;
@@ -1745,7 +1773,7 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
         return;
     }
 
-    int concurrency = benchmark_concurrency(cfg);
+    int concurrency = (cfg.concurrency > 0) ? cfg.concurrency : benchmark_concurrency(cfg);
     std::cout << MAGENTA << "📥 Downloading " << q.size() << " unique wheels (concurrency: " << concurrency << ")..." << RESET << std::endl;
 
     std::mutex m;
@@ -1867,7 +1895,7 @@ std::string extract_exception(const std::string& output) {
     return last_err;
 }
 
-void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto", bool profile = false, bool no_cleanup = false, int revision_limit = -1, bool test_all_revisions = false, bool vary_python = false, int pkg_revision_limit = 1) {
+void matrix_test(const Config& cfg, const std::string& pkg, const std::string& custom_test_script = "", const std::string& python_version = "auto", bool profile = false, bool no_cleanup = false, int revision_limit = -1, bool test_all_revisions = false, bool vary_python = false, int pkg_revision_limit = 1, const std::string& pinned_pkg_ver = "") {
     if (vary_python) {
         std::cout << MAGENTA << "🧪 Starting Compatibility Test (Python Matrix) for " << BOLD << pkg << RESET << std::endl;
     } else {
@@ -1904,7 +1932,11 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
         }
 
     } else {
-        versions = get_all_versions(pkg);
+        if (!pinned_pkg_ver.empty()) {
+            versions = {pinned_pkg_ver};
+        } else {
+            versions = get_all_versions(pkg);
+        }
     }
 
     if (versions.empty()) {
@@ -3239,6 +3271,115 @@ void profile_package(const Config& cfg, const std::string& pkg, bool ai_review =
     std::cout << std::endl;
 }
 
+// DISTRIBUTED ARCHITECTURE (EPYC CLASS)
+void init_queue_db(const Config& cfg) {
+    sqlite3* db;
+    fs::path q_path = cfg.spip_root / "queue.db";
+    sqlite3_open(q_path.c_str(), &db);
+    sqlite3_busy_timeout(db, 10000);
+    const char* sql = "CREATE TABLE IF NOT EXISTS work_queue ("
+                      "id INTEGER PRIMARY KEY, pkg_name TEXT, pkg_ver TEXT, py_ver TEXT, "
+                      "status TEXT, worker_id TEXT, result_json TEXT, "
+                      "started_at REAL, finished_at REAL);";
+    sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+}
+
+void run_master(const Config& cfg, const std::string& pkg) {
+    setup_project_env(const_cast<Config&>(cfg));
+    init_queue_db(cfg);
+    std::cout << MAGENTA << "👑 SPIP Master: Populating task queue for " << pkg << "..." << RESET << std::endl;
+    
+    // Resolve all versions
+    auto versions = get_all_versions(pkg);
+    std::vector<std::string> py_versions = {"3.7", "3.8", "3.9", "3.10", "3.11", "3.12", "3.13"};
+    
+    sqlite3* db;
+    sqlite3_open((cfg.spip_root / "queue.db").c_str(), &db);
+    sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+    
+    int count = 0;
+    for (const auto& v : versions) {
+        // For heavy servers, we can populate thousands of combinations
+        for (const auto& py : py_versions) {
+            std::string sql = std::format("INSERT INTO work_queue (pkg_name, pkg_ver, py_ver, status) "
+                                          "VALUES ({}, {}, {}, 'PENDING');", 
+                                          quote_arg(pkg), quote_arg(v), quote_arg(py));
+            sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
+        }
+    }
+    sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    
+    std::cout << GREEN << "✔️  Queue ready. Workers can now claim tasks." << RESET << std::endl;
+}
+
+void run_worker(Config& cfg) {
+    setup_project_env(cfg);
+    init_queue_db(cfg);
+    std::cout << CYAN << "👷 SPIP Worker [" << cfg.worker_id << "] started. Polling queue..." << RESET << std::endl;
+    
+    sqlite3* db;
+    sqlite3_open((cfg.spip_root / "queue.db").c_str(), &db);
+    sqlite3_busy_timeout(db, 10000);
+
+    while (!g_interrupted) {
+        // Atomic claim using RETURNING (SQLite 3.35+)
+        sqlite3_stmt* stmt;
+        const char* claim_sql = "UPDATE work_queue SET status='CLAIMED', worker_id=?, started_at=julianday('now') "
+                                "WHERE id = (SELECT id FROM work_queue WHERE status='PENDING' LIMIT 1) "
+                                "RETURNING id, pkg_name, pkg_ver, py_ver;";
+        
+        if (sqlite3_prepare_v2(db, claim_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+             std::this_thread::sleep_for(std::chrono::seconds(1));
+             continue;
+        }
+        
+        sqlite3_bind_text(stmt, 1, cfg.worker_id.c_str(), -1, SQLITE_TRANSIENT);
+        
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            int tid = sqlite3_column_int(stmt, 0);
+            std::string pkg = (const char*)sqlite3_column_text(stmt, 1);
+            std::string ver = (const char*)sqlite3_column_text(stmt, 2);
+            std::string py = (const char*)sqlite3_column_text(stmt, 3);
+            sqlite3_finalize(stmt);
+
+            std::cout << YELLOW << "⚡ Claimed Task [" << tid << "]: " << pkg << " " << ver << " (Py " << py << ")" << RESET << std::endl;
+            
+            try {
+                // Create a simple test script to avoid slow LLM generation in matrix_test
+                fs::path fast_test = cfg.spip_root / "scripts" / (pkg + "_simple_test.py");
+                if (!fs::exists(fast_test)) {
+                    std::string mod_pkg = pkg;
+                    std::replace(mod_pkg.begin(), mod_pkg.end(), '-', '_');
+                    std::ofstream os(fast_test);
+                    os << "import " << mod_pkg << "\n";
+                    os << "print('Successfully imported " << mod_pkg << "')\n";
+                    os.close();
+                }
+
+                Config w_cfg = cfg;
+                w_cfg.concurrency = 1; // Single-node focus
+                w_cfg.telemetry = true;
+                
+                matrix_test(w_cfg, pkg, fast_test.string(), py, false, false, 1, false, false, 1, ver);
+                
+                std::string res_sql = std::format("UPDATE work_queue SET status='COMPLETED', finished_at=julianday('now') WHERE id={};", tid);
+                sqlite3_exec(db, res_sql.c_str(), nullptr, nullptr, nullptr);
+                std::cout << GREEN << "✔️  Task [" << tid << "] Completed." << RESET << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << RED << "❌ Task [" << tid << "] Failed: " << e.what() << RESET << std::endl;
+                std::string res_sql = std::format("UPDATE work_queue SET status='FAILED', finished_at=julianday('now') WHERE id={};", tid);
+                sqlite3_exec(db, res_sql.c_str(), nullptr, nullptr, nullptr);
+            }
+        } else {
+            sqlite3_finalize(stmt);
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+    }
+    sqlite3_close(db);
+}
+
 void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) {
         std::cout << "Usage: spip <install|uninstall|use|run|shell|list|cleanup|gc|log|search|tree|trim|verify|test|freeze|prune|audit|review|fetch-db|top|implement|boot|bundle|matrix|compat|profile> [args...]" << std::endl;
@@ -3634,6 +3775,13 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         } else {
             run_thread_test(b_cfg);
         }
+    }
+    else if (command == "master") {
+        if (!require_args(args, 2, "Usage: spip master <pkg>")) return;
+        run_master(cfg, args[1]);
+    }
+    else if (command == "worker") {
+        run_worker(cfg);
     }
     else if (command == "list") {
         ensure_dirs(cfg);

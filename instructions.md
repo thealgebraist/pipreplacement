@@ -62,3 +62,7 @@
 - [x] **Stall Prevention & Hardened I/O**: 
     - [x] Integrated `timeout` and `curl` reachability flags to prevent dead connections from hanging the parallel downloader.
     - [x] Configured `sqlite3_busy_timeout` (10s) to handle high-concurrency database contention on multi-core servers.
+- [ ] **EPYC Class Scaling (Roadmap)**: 
+    - [ ] Created `task.md` outlining the shift to multi-instance orchestration (SPIP-Master).
+    - [ ] Proposed `tmpfs` integration for zero-latency Git worktrees.
+    - [ ] Design for WAL-mode SQLite telemetry to support massive cross-process logging.
