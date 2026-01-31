@@ -17,7 +17,8 @@ void MatrixTester::parallel_execution(const std::vector<std::string>& to_do, con
             
             // 1. Setup isolated environment
             Config tcfg = cfg;
-            std::string py_ver = vp ? (ver.find(':') != std::string::npos ? split(ver, ':')[0] : pv) : pv;
+            std::string resolved_pv = (pv == "auto") ? "3.12" : pv;
+            std::string py_ver = vp ? (ver.find(':') != std::string::npos ? split(ver, ':')[0] : resolved_pv) : resolved_pv;
             std::string pkg_ver = vp ? (ver.find(':') != std::string::npos ? split(ver, ':')[1] : ver) : ver;
             
             // Unique path per task to avoid collisions
