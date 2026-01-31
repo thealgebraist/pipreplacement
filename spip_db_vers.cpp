@@ -12,10 +12,15 @@ std::vector<std::string> get_all_versions(const std::string& pkg) {
         std::string json((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>()); 
         size_t rel_pos = json.find("releases");
         if (rel_pos != std::string::npos) {
-            std::regex ver_re(R"(\"([0-9]+\.[0-9]+(\.[0-9]+)?([a-zA-Z0-9]+)?)\"\s*:)");
+            // Match keys that map to arrays [ ... ] which is the structure of releases
+            std::regex ver_re(R"(\"([^\"]+)\"\s*:\s*\[)");
             auto begin = std::sregex_iterator(json.begin() + rel_pos, json.end(), ver_re);
             auto end = std::sregex_iterator();
-            for (std::sregex_iterator i = begin; i != end; ++i) versions.push_back((*i)[1].str());
+            for (std::sregex_iterator i = begin; i != end; ++i) {
+                // heuristic: stop if we hit something that looks like the start of another top-level key (unlikely in standardized JSON but good safety)
+                if ((*i).position() > 20 && json.substr(rel_pos + (*i).position() - 2, 2) == "},") break; 
+                versions.push_back((*i)[1].str());
+            }
         }
     }
     std::stable_sort(versions.begin(), versions.end(), [](const std::string& a, const std::string& b) {
