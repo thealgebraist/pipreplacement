@@ -34,3 +34,4 @@ git_test/
 # Test Scripts
 test_*_gen.py
 scripts/test_distributed.sh
+temp_e2e_matrix/dependency_test_pkg

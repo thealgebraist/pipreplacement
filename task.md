@@ -9,6 +9,7 @@
     - [x] Implemented `master`/`worker` distributed orchestration via SQLite task queue.
     - [x] Integrated `tmpfs` RAM-disk support for `envs/` root to eliminate I/O wait.
     - [x] Split telemetry into isolated per-run databases with 5-second batch transactions.
+    - [x] Implemented hourly smoke-test GitHub Action on 4 random top-1000 packages.
 - [x] Implement an **Aggressive Matrix Sharder** that splits a 1600+ combination test into $N$ workloads across different repo replicas.
 - [x] Standardize a shared-nothing architecture to avoid any shared mutexes across the $N$ instances.
 
