@@ -27,10 +27,10 @@ jobs:
           ninja -t clean || true
           ninja spip
 
-      - name: Pick 4 random top packages
+      - name: Pick 16 random top packages
         id: pick-pkgs
         run: |
-          pkgs=$(python3 scripts/pick_random_pkgs.py)
+          pkgs=$(python3 scripts/pick_random_pkgs.py 16)
           echo "pkgs=$pkgs" >> $GITHUB_OUTPUT
           echo "Selected: $pkgs"
 

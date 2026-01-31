@@ -8,7 +8,7 @@ bool resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         std::replace(lower_name.begin(), lower_name.end(), '_', '-'); std::replace(lower_name.begin(), lower_name.end(), '.', '-');
         if (installed.count(lower_name)) continue;
         PackageInfo info = (i == 1 && !version.empty()) ? get_package_info(name, version, target_py) : get_package_info(name, "", target_py);
-        if (info.wheel_url.empty()) { std::cout << RED << "❌ Could not find wheel URL for " << name << RESET << std::endl; continue; }
+        static std::set<std::string> shown_missing; if (info.wheel_url.empty()) { if (!shown_missing.count(name)) { std::cout << RED << "❌ Could not find wheel URL for " << name << RESET << std::endl; shown_missing.insert(name); } continue; }
         resolved[lower_name] = info; installed.insert(lower_name); for (const auto& d : info.dependencies) queue.push_back(d);
     }
     fs::path site_packages = get_site_packages(cfg);

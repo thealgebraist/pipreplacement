@@ -4,7 +4,7 @@
 
 PackageInfo get_package_info(const std::string& pkg, const std::string& version, const std::string& target_py) {
     fs::path db_file = get_db_path(pkg);
-    if (!fs::exists(db_file)) { std::cout << YELLOW << "⚠️ Metadata for " << pkg << " not in local DB. Fetching..." << RESET << std::endl; Config cfg = init_config(); fetch_package_metadata(cfg, pkg); }
+    if (!fs::exists(db_file)) { static std::set<std::string> shown; if (!shown.count(pkg)) { std::cout << YELLOW << "⚠️ Metadata for " << pkg << " not in local DB. Fetching..." << RESET << std::endl; shown.insert(pkg); } Config cfg = init_config(); fetch_package_metadata(cfg, pkg); }
     std::ifstream ifs(db_file); std::string content((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
     PackageInfo info; if (content.empty()) return info; info.name = pkg;
     if (version.empty()) {
