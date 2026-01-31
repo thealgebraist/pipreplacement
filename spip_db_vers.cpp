@@ -3,13 +3,16 @@
 
 std::vector<std::string> get_all_versions(const std::string& pkg) {
     fs::path db_file = get_db_path(pkg);
-    if (!fs::exists(db_file)) { Config cfg = init_config(); fetch_package_metadata(cfg, pkg); }
+    if (!fs::exists(db_file)) {
+        Config cfg = init_config(); fetch_package_metadata(cfg, pkg);
+    }
     std::vector<std::string> versions;
     if (fs::exists(db_file)) {
-        std::ifstream ifs(db_file); std::string json((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>()); 
+        std::ifstream ifs(db_file);
+        std::string json((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>()); 
         size_t rel_pos = json.find("releases");
         if (rel_pos != std::string::npos) {
-            std::regex ver_re(R"(\"([0-9]+\.[0-9]+(\.[0-9]+)?([a-zA-Z0-9]+)?)\"\s*:) ");
+            std::regex ver_re(R"(\"([0-9]+\.[0-9]+(\.[0-9]+)?([a-zA-Z0-9]+)?)\"\s*:)");
             auto begin = std::sregex_iterator(json.begin() + rel_pos, json.end(), ver_re);
             auto end = std::sregex_iterator();
             for (std::sregex_iterator i = begin; i != end; ++i) versions.push_back((*i)[1].str());
