@@ -24,12 +24,12 @@ void run_package_tests(const Config& cfg, const std::string& pkg) {
     }
     std::cout << MAGENTA << "🧪 Testing " << pkg << "..." << RESET << std::endl;
     const fs::path bin = cfg.project_env_path / "bin" / "python";
-    const std::string py_check = std::format("{} -c \"import importlib.util; exit(0 if importlib.util.find_spec('pytest') else 1)\"", quote_arg(bin.string()));
+    const std::string py_check = std::format("{}" -c "import importlib.util; exit(0 if importlib.util.find_spec('pytest') else 1)", quote_arg(bin.string()));
     if (run_shell(py_check.c_str()) != 0) {
-        const std::string inst_pytest = std::format("{} -m pip install pytest", quote_arg(bin.string()));
+        const std::string inst_pytest = std::format("{}" -m pip install pytest, quote_arg(bin.string()));
         run_shell(inst_pytest.c_str());
     }
-    const std::string test_cmd = std::format("{} -m pytest {}", quote_arg(bin.string()), quote_arg(path.string()));
+    const std::string test_cmd = std::format("{}" -m pytest {}, quote_arg(bin.string()), quote_arg(path.string()));
     run_shell(test_cmd.c_str());
 }
 

@@ -1,8 +1,8 @@
-name: Hourly Matrix Test
+name: Quarter-Hourly Matrix Test
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Every hour
+    - cron: '*/15 * * * *'  # 4 times an hour
   workflow_dispatch:      # Manual trigger
 
 jobs:

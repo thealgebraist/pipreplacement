@@ -1,7 +1,7 @@
 # Project: Smart Pip (spip) - A Safe Pip Replacement
 
 **Developer**: Gemini Agent
-**Task**: Fix GitHub Action syntax error in hourly test workflow.
+**Task**: Move .o files to a separate build directory to clean up the source tree.
 
 ## Components
 

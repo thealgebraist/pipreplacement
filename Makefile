@@ -19,15 +19,19 @@ SRCS = spip_globals.cpp spip_utils.cpp spip_utils_shell.cpp spip_utils_exec.cpp 
        spip_matrix_par.cpp spip_matrix_summary.cpp spip_matrix_bench.cpp \
        spip_distributed.cpp spip_worker.cpp spip_mirrors.cpp spip_cmd.cpp spip_main.cpp
 
-OBJS = $(SRCS:.cpp=.o)
+OBJDIR = build
+OBJS = $(addprefix $(OBJDIR)/, $(SRCS:.cpp=.o))
 
-all: spip
+all: $(OBJDIR) spip
+
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
 
 spip: $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS)
 
-%.o: %.cpp
+$(OBJDIR)/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) spip
+	rm -rf $(OBJDIR) spip
