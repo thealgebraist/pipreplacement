@@ -11,6 +11,12 @@ std::string quote_arg(const std::string& arg) {
 }
 
 int run_shell(const char* cmd) {
-    return std::system(cmd);
+    if (g_interrupted) return 130;
+    int ret = std::system(cmd);
+    if ((WIFSIGNALED(ret) && WTERMSIG(ret) == SIGINT) || 
+        (WIFEXITED(ret) && WEXITSTATUS(ret) == 130)) {
+        g_interrupted = true;
+    }
+    return ret;
 }
 
