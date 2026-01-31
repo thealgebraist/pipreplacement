@@ -498,6 +498,7 @@ void ensure_scripts(const Config& cfg) {
 }
 
 void ensure_envs_tmpfs(const Config& cfg) {
+    (void)cfg;
 #ifdef __linux__
     // Performance: mount envs_root as tmpfs for zero I/O wait during matrix tests
     if (std::getenv("SPIP_NO_TMPFS")) return;
@@ -1850,7 +1851,7 @@ void run_thread_test(const Config& cfg, int num_threads = -1) {
     std::atomic<int> total_completed{0};
 
     for (int i = 0; i < n; ++i) {
-        workers.emplace_back([&, i]() {
+        workers.emplace_back([&]() {
             running_count++;
             // Busy work to saturate core
             volatile double sink = 0;
