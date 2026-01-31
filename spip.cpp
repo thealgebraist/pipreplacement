@@ -1,4 +1,5 @@
 #include <iostream>
+#include <unistd.h>
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -1140,17 +1141,17 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
 
             std::lock_guard<std::mutex> lock(*wheel_lock);
             if (!fs::exists(temp_wheel) || fs::file_size(temp_wheel) == 0) {
-                // Use temporary file for atomic write
-                fs::path partial = temp_wheel;
-                partial += ".part";
+                fs::path partial = temp_wheel.string() + ".part." + std::to_string(getpid());
                 // Only show progress bars if not in high-concurrency mode to avoid garbled output
                 bool quiet = (std::thread::hardware_concurrency() > 8);
                 // Respecting user rule for external command timeouts, but using a larger window for large wheels
-                std::string dl_cmd = std::format("timeout 300 curl -L --connect-timeout 10 --max-time 240 -s {} {} -o {}", 
+                std::string dl_cmd = std::format("timeout 300 curl -f -L --connect-timeout 10 --max-time 240 -s {} {} -o {}", 
                     quiet ? "" : "-#", quote_arg(info.wheel_url), quote_arg(partial.string()));
-                std::system(dl_cmd.c_str());
-                if (fs::exists(partial)) {
-                    fs::rename(partial, temp_wheel);
+                if (std::system(dl_cmd.c_str()) == 0 && fs::exists(partial) && fs::file_size(partial) > 0) {
+                    std::error_code ec;
+                    fs::rename(partial, temp_wheel, ec);
+                } else if (fs::exists(partial)) {
+                    fs::remove(partial);
                 }
             }
         }
@@ -1165,22 +1166,21 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         int ret = std::system(extract_cmd.c_str());
         
         if (ret != 0) {
-            std::cerr << YELLOW << "⚠️ Extraction failed. Wheel might be corrupt. Deleting and retrying..." << RESET << std::endl;
-            fs::remove(temp_wheel);
+            std::cerr << YELLOW << "⚠️ Extraction failed for " << name << ". Wheel might be corrupt. Deleting and retrying hardened download..." << RESET << std::endl;
+            if (fs::exists(temp_wheel)) fs::remove(temp_wheel);
             
-            // Retry download once
-             std::string dl_cmd = std::format("curl -L -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(temp_wheel.string()));
-             int dl_ret = std::system(dl_cmd.c_str());
-             
-             if (dl_ret == 0 && fs::exists(temp_wheel)) {
-                 ret = std::system(extract_cmd.c_str());
-             }
-             
-             if (ret != 0) {
-                 std::cerr << RED << "❌ Installation failed for " << name << ". (Bad wheel or extraction error)" << RESET << std::endl;
-                 // Clean up bad wheel to prevent future loops, unless debugging
-                 if (fs::exists(temp_wheel)) fs::remove(temp_wheel); 
-             }
+            // Retry hardened download once
+            std::string dl_cmd = std::format("timeout 300 curl -f -L --connect-timeout 10 --max-time 240 -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(temp_wheel.string()));
+            int dl_ret = std::system(dl_cmd.c_str());
+            
+            if (dl_ret == 0 && fs::exists(temp_wheel)) {
+                ret = std::system(extract_cmd.c_str());
+            }
+            
+            if (ret != 0) {
+                std::cerr << RED << "❌ Installation failed for " << name << ". (Bad wheel or extraction error after retry)" << RESET << std::endl;
+                if (fs::exists(temp_wheel)) fs::remove(temp_wheel); 
+            }
         }
     }
 }
@@ -1791,15 +1791,18 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
             }
             
             fs::path target = cfg.spip_root / (info.name + "-" + info.version + ".whl");
+            fs::path partial = target.string() + ".part." + std::to_string(getpid());
             // Wrap in timeout to prevent stall on dead connections
-            std::string cmd = std::format("timeout 300 curl -L --connect-timeout 10 --max-time 240 -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(target.string()));
+            std::string cmd = std::format("timeout 300 curl -f -L --connect-timeout 10 --max-time 240 -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(partial.string()));
             int ret = std::system(cmd.c_str());
             
-            if (g_interrupted || ret != 0) {
-                 if (fs::exists(target)) {
-                     fs::remove(target); // Cleanup partial file
-                 }
-                 if (g_interrupted) return;
+            if (!g_interrupted && ret == 0 && fs::exists(partial) && fs::file_size(partial) > 0) {
+                std::error_code ec;
+                fs::rename(partial, target, ec);
+            } else {
+                if (fs::exists(partial)) fs::remove(partial);
+                if (g_interrupted) return;
+                continue; // Retry or skip
             }
             
             int c = ++completed;
