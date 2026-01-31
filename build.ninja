@@ -1,7 +1,72 @@
-rule cxx
-  command = g++ -std=c++23 -O3 -Wall -Wextra -pedantic $in -o $out -lsqlite3
-  description = Compiling $out
+cxx = g++
+cxxflags = -std=c++23 -O3 -Wall -Wextra -pedantic -I.
+ldflags = -lsqlite3
 
-build spip: cxx spip.cpp
+rule compile
+  command = $cxx $cxxflags -c $in -o $out
+  description = CC $out
+
+rule link
+  command = $cxx $cxxflags -o $out $in $ldflags
+  description = LINK $out
+
+build spip_globals.o: compile spip_globals.cpp
+build spip_utils.o: compile spip_utils.cpp
+build spip_utils_shell.o: compile spip_utils_shell.cpp
+build spip_utils_exec.o: compile spip_utils_exec.cpp
+build ResourceProfiler.o: compile ResourceProfiler.cpp
+build get_dir_size.o: compile get_dir_size.cpp
+build ErrorKnowledgeBase.o: compile ErrorKnowledgeBase.cpp
+build ErrorKnowledgeBase_store.o: compile ErrorKnowledgeBase_store.cpp
+build ErrorKnowledgeBase_lookup.o: compile ErrorKnowledgeBase_lookup.cpp
+build ErrorKnowledgeBase_fixes.o: compile ErrorKnowledgeBase_fixes.cpp
+build TelemetryLogger.o: compile TelemetryLogger.cpp
+build TelemetryLogger_methods.o: compile TelemetryLogger_methods.cpp
+build TelemetryLogger_loop.o: compile TelemetryLogger_loop.cpp
+build TelemetryLogger_sample_apple.o: compile TelemetryLogger_sample_apple.cpp
+build TelemetryLogger_sample_linux.o: compile TelemetryLogger_sample_linux.cpp
+build TelemetryLogger_log.o: compile TelemetryLogger_log.cpp
+build spip_env.o: compile spip_env.cpp
+build spip_env_dirs.o: compile spip_env_dirs.cpp
+build spip_env_git.o: compile spip_env_git.cpp
+build spip_env_setup.o: compile spip_env_setup.cpp
+build spip_env_helpers.o: compile spip_env_helpers.cpp
+build spip_python.o: compile spip_python.cpp
+build spip_python_bin.o: compile spip_python_bin.cpp
+build spip_python_base.o: compile spip_python_base.cpp
+build spip_python_req.o: compile spip_python_req.cpp
+build spip_db.o: compile spip_db.cpp
+build spip_db_fetch.o: compile spip_db_fetch.cpp
+build spip_db_json.o: compile spip_db_json.cpp
+build spip_db_vers.o: compile spip_db_vers.cpp
+build spip_install_wheel.o: compile spip_install_wheel.cpp
+build spip_install_info.o: compile spip_install_info.cpp
+build spip_install_main.o: compile spip_install_main.cpp
+build spip_install_single.o: compile spip_install_single.cpp
+build spip_install_ops.o: compile spip_install_ops.cpp
+build spip_install_prune.o: compile spip_install_prune.cpp
+build spip_test_tree.o: compile spip_test_tree.cpp
+build spip_test_pkg.o: compile spip_test_pkg.cpp
+build spip_test_boot.o: compile spip_test_boot.cpp
+build spip_test_utils.o: compile spip_test_utils.cpp
+build spip_test_ai.o: compile spip_test_ai.cpp
+build spip_test_trim.o: compile spip_test_trim.cpp
+build spip_test_exc.o: compile spip_test_exc.cpp
+build spip_matrix_test_func.o: compile spip_matrix_test_func.cpp
+build spip_matrix_tester.o: compile spip_matrix_tester.cpp
+build spip_matrix_tester_impl.o: compile spip_matrix_tester_impl.cpp
+build spip_matrix_select.o: compile spip_matrix_select.cpp
+build spip_matrix_dl.o: compile spip_matrix_dl.cpp
+build spip_matrix_resolve.o: compile spip_matrix_resolve.cpp
+build spip_matrix_par.o: compile spip_matrix_par.cpp
+build spip_matrix_summary.o: compile spip_matrix_summary.cpp
+build spip_matrix_bench.o: compile spip_matrix_bench.cpp
+build spip_distributed.o: compile spip_distributed.cpp
+build spip_worker.o: compile spip_worker.cpp
+build spip_mirrors.o: compile spip_mirrors.cpp
+build spip_cmd.o: compile spip_cmd.cpp
+build spip_main.o: compile spip_main.cpp
+
+build spip: link spip_globals.o spip_utils.o spip_utils_shell.o spip_utils_exec.o ResourceProfiler.o get_dir_size.o ErrorKnowledgeBase.o ErrorKnowledgeBase_store.o ErrorKnowledgeBase_lookup.o ErrorKnowledgeBase_fixes.o TelemetryLogger.o TelemetryLogger_methods.o TelemetryLogger_loop.o TelemetryLogger_sample_apple.o TelemetryLogger_sample_linux.o TelemetryLogger_log.o spip_env.o spip_env_dirs.o spip_env_git.o spip_env_setup.o spip_env_helpers.o spip_python.o spip_python_bin.o spip_python_base.o spip_python_req.o spip_db.o spip_db_fetch.o spip_db_json.o spip_db_vers.o spip_install_wheel.o spip_install_info.o spip_install_main.o spip_install_single.o spip_install_ops.o spip_install_prune.o spip_test_tree.o spip_test_pkg.o spip_test_boot.o spip_test_utils.o spip_test_ai.o spip_test_trim.o spip_test_exc.o spip_matrix_test_func.o spip_matrix_tester.o spip_matrix_tester_impl.o spip_matrix_select.o spip_matrix_dl.o spip_matrix_resolve.o spip_matrix_par.o spip_matrix_summary.o spip_matrix_bench.o spip_distributed.o spip_worker.o spip_mirrors.o spip_cmd.o spip_main.o
 
 default spip

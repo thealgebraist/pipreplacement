@@ -1,5 +1,12 @@
 #include "TelemetryLogger.h"
 #ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/processor_info.h>
+#include <mach/mach_host.h>
+#include <net/if.h>
+#include <ifaddrs.h>
+#include <net/if_dl.h>
+
 void TelemetryLogger::sample() {
     double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
     natural_t cpuCount; processor_info_array_t infoArray; mach_msg_type_number_t infoCount;
