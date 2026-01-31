@@ -21,6 +21,7 @@
 #include <csignal>
 #include <sqlite3.h>
 #include <future>
+#include <semaphore>
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/processor_info.h>
@@ -29,6 +30,9 @@
 #include <ifaddrs.h>
 #include <net/if_dl.h>
 #endif
+
+// Semaphores for resource capping
+std::counting_semaphore<8> g_git_sem{8}; 
 
 volatile std::atomic<bool> g_interrupted{false};
 
@@ -1070,13 +1074,28 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
         
         fs::path temp_wheel = cfg.spip_root / (name + "-" + info.version + ".whl");
         if (!fs::exists(temp_wheel) || fs::file_size(temp_wheel) == 0) {
-            static std::mutex m_dl;
-            std::lock_guard<std::mutex> lock(m_dl);
+            // Per-wheel lock to allow parallel downloads of different packages
+            static std::mutex m_registry;
+            static std::map<std::string, std::shared_ptr<std::mutex>> locks;
+            
+            std::shared_ptr<std::mutex> wheel_lock;
+            {
+                std::lock_guard<std::mutex> lock(m_registry);
+                if (locks.find(info.wheel_url) == locks.end()) {
+                    locks[info.wheel_url] = std::make_shared<std::mutex>();
+                }
+                wheel_lock = locks[info.wheel_url];
+            }
+
+            std::lock_guard<std::mutex> lock(*wheel_lock);
             if (!fs::exists(temp_wheel) || fs::file_size(temp_wheel) == 0) {
                 // Use temporary file for atomic write
                 fs::path partial = temp_wheel;
                 partial += ".part";
-                std::string dl_cmd = std::format("curl -L -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(partial.string()));
+                // Only show progress bars if not in high-concurrency mode to avoid garbled output
+                bool quiet = (std::thread::hardware_concurrency() > 8);
+                std::string dl_cmd = std::format("curl -L -s {} {} -o {}", 
+                    quiet ? "" : "-#", quote_arg(info.wheel_url), quote_arg(partial.string()));
                 std::system(dl_cmd.c_str());
                 if (fs::exists(partial)) {
                     fs::rename(partial, temp_wheel);
@@ -2085,9 +2104,9 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                     }
                 }
 
-                // High-concurrency Git operations need serialization to prevent index.lock failures
+                // High-concurrency Git operations need throttling but not full serialization
                 {
-                    std::lock_guard<std::mutex> l_git(m_git);
+                    g_git_sem.acquire();
                     std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
                          quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
                          
@@ -2102,9 +2121,11 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                          std::error_code ec_retry;
                          if (fs::exists(matrix_path, ec_retry)) fs::remove_all(matrix_path, ec_retry);
                          if (std::system(wt_cmd.c_str()) != 0) {
+                             g_git_sem.release();
                              throw std::runtime_error("Failed to add git worktree even after cleanup.");
                          }
                     }
+                    g_git_sem.release();
                 }
 
         Config m_cfg = cfg;
@@ -2432,9 +2453,10 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
         // Thread-local cleanup necessary for parallel unique paths
         if (!no_cleanup) {
-             std::lock_guard<std::mutex> l_git(m_git);
+             g_git_sem.acquire();
              std::string rm_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()));
              std::system(rm_cmd.c_str());
+             g_git_sem.release();
         }
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> l(m_out);
