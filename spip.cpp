@@ -52,13 +52,16 @@ class ResourceProfiler {
     struct rusage start_usage;
     intmax_t start_disk;
     fs::path track_path;
+    bool active = false;
 
 public:
     ResourceProfiler(fs::path p = "") : track_path(p) {
         start_wall = std::chrono::steady_clock::now();
         getrusage(RUSAGE_SELF, &start_usage);
-        if (!track_path.empty() && fs::exists(track_path)) {
+        std::error_code ec;
+        if (!track_path.empty() && fs::exists(track_path, ec)) {
             start_disk = static_cast<intmax_t>(get_dir_size(track_path));
+            active = true;
         } else {
             start_disk = 0;
         }
@@ -69,7 +72,8 @@ public:
         struct rusage end_usage;
         getrusage(RUSAGE_SELF, &end_usage);
         intmax_t end_disk = 0;
-        if (!track_path.empty() && fs::exists(track_path)) {
+        std::error_code ec;
+        if (active && !track_path.empty() && fs::exists(track_path, ec)) {
              end_disk = static_cast<intmax_t>(get_dir_size(track_path));
         }
 
@@ -82,7 +86,7 @@ public:
 
         return {
             user_time + sys_time,
-            end_usage.ru_maxrss, // On Mac this is bytes, on Linux it is KB. We'll treat as KB for display.
+            end_usage.ru_maxrss, 
             wall_diff.count(),
             end_disk - start_disk
         };
@@ -1963,59 +1967,50 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     ErrorKnowledgeBase kb(cfg.db_file);
     
     auto worker_task = [&]() {
-        while(true) {
-            size_t task_i = g_idx.fetch_add(1);
-            if(task_i >= to_do.size()) break;
-            const auto& ver = to_do[task_i];
+        while(!g_interrupted) {
+            try {
+                size_t task_i = g_idx.fetch_add(1);
+                if(task_i >= to_do.size()) break;
+                const auto& ver = to_do[task_i];
+                
+                { 
+                    std::lock_guard<std::mutex> l(m_out);
+                    std::cout << "\n" << BOLD << BLUE << "════════════════════════════════════════════════════════════" << RESET << std::endl;
+                }
             
-            { 
-                std::lock_guard<std::mutex> l(m_out);
-                std::cout << "\n" << BOLD << BLUE << "════════════════════════════════════════════════════════════" << RESET << std::endl;
-            }
-        
-            Result res { ver, false, false, false, {0,0,0,0} };
-        
+                Result res { ver, false, false, false, {0,0,0,0} };
+                PackageInfo v_info;
+                std::string target_py;
 
-        
-        PackageInfo v_info;
-        std::string target_py;
+                if (vary_python) {
+                    if (ver.find(':') != std::string::npos) {
+                        auto parts = split(ver, ':');
+                        target_py = parts[0];
+                        v_info = get_package_info(pkg, parts[1]);
+                    } else {
+                        v_info = get_package_info(pkg); 
+                        target_py = ver; 
+                    }
+                } else {
+                    v_info = get_package_info(pkg, ver);
+                    target_py = (python_version == "auto") ? parse_python_requirement(v_info.requires_python) : python_version;
+                }
 
-        if (vary_python) {
-            // Check if combined key
-            if (ver.find(':') != std::string::npos) {
-                auto parts = split(ver, ':');
-                target_py = parts[0];
-                std::string pkg_v = parts[1];
-                v_info = get_package_info(pkg, pkg_v);
-            } else {
-                v_info = get_package_info(pkg); // Always test latest package version in compat mode
-                target_py = ver; // ver is the python version (e.g. "3.12")
-            }
-        } else {
-            v_info = get_package_info(pkg, ver);
-            target_py = python_version;
-            if (target_py == "auto") {
-                target_py = parse_python_requirement(v_info.requires_python);
-            }
-        }
+                {
+                    std::lock_guard<std::mutex> l(m_out);
+                    std::cout << BOLD << "🚀 Testing Version (" << (task_i + 1) << "/" << total_vers << "): " << GREEN << ver << RESET 
+                              << " (Python " << YELLOW << target_py << RESET << ")" << std::endl;
+                }
 
-        {
-            std::lock_guard<std::mutex> l(m_out);
-            std::cout << BOLD << "🚀 Testing Version (" << (task_i + 1) << "/" << total_vers << "): " << GREEN << ver << RESET 
-                      << " (Python " << YELLOW << target_py << RESET << ")" << std::endl;
-        }
+                std::string safe_ver = ver;
+                for(char& c : safe_ver) if(!isalnum(c) && c!='.' && c!='-') c = '_';
+                fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash + "_" + safe_ver);
 
-        // Use a unique path per version for parallel isolation
-        std::string safe_ver = ver;
-        for(char& c : safe_ver) if(!isalnum(c) && c!='.' && c!='-') c = '_';
-        fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash + "_" + safe_ver);
+                std::error_code ec;
+                if(fs::exists(matrix_path, ec)) fs::remove_all(matrix_path, ec);
+                ec.clear();
 
-        ResourceProfiler* v_prof = profile ? new ResourceProfiler(matrix_path) : nullptr;
-        
-        // Ensure clean start for this version
-        
-        // Ensure clean start for this version
-        if(fs::exists(matrix_path)) fs::remove_all(matrix_path);
+                std::unique_ptr<ResourceProfiler> v_prof = profile ? std::make_unique<ResourceProfiler>(matrix_path) : nullptr;
         
 
         // Setup/Refresh worktree
@@ -2051,7 +2046,8 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                  std::system(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
              }
              // Retry
-             if (fs::exists(matrix_path)) fs::remove_all(matrix_path);
+             std::error_code ec_retry;
+             if (fs::exists(matrix_path, ec_retry)) fs::remove_all(matrix_path, ec_retry);
              std::system(wt_cmd.c_str());
         }
 
@@ -2365,7 +2361,6 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
         if (profile && v_prof) {
             res.stats = v_prof->stop();
-            delete v_prof;
         }
 
         {
@@ -2384,7 +2379,14 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
              std::string rm_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()));
              std::system(rm_cmd.c_str());
         }
-    } // end while
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> l(m_out);
+                std::cerr << RED << "🔥 Worker exception: " << e.what() << RESET << std::endl;
+            } catch (...) {
+                std::lock_guard<std::mutex> l(m_out);
+                std::cerr << RED << "🔥 Worker unknown exception" << RESET << std::endl;
+            }
+        }
     }; // end lambda
 
     // Launch workers
@@ -2699,10 +2701,19 @@ void bundle_package(const Config& cfg, const std::string& path) {
 
 uintmax_t get_dir_size(const fs::path& p) {
     uintmax_t size = 0;
-    if (fs::exists(p) && fs::is_directory(p)) {
-        for (const auto& entry : fs::recursive_directory_iterator(p)) {
-            if (fs::is_regular_file(entry)) size += fs::file_size(entry);
-        }
+    std::error_code ec;
+    if (fs::exists(p, ec) && fs::is_directory(p, ec)) {
+        try {
+            for (auto it = fs::recursive_directory_iterator(p, fs::directory_options::skip_permission_denied, ec);
+                 it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                if (ec) break;
+                if (fs::is_regular_file(*it, ec)) {
+                    uintmax_t s = fs::file_size(*it, ec);
+                    if (!ec) size += s;
+                }
+                ec.clear();
+            }
+        } catch (...) {}
     }
     return size;
 }
