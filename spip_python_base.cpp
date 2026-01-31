@@ -17,7 +17,7 @@ void create_base_version(const Config& cfg, const std::string& version) {
     std::string git_cmd = std::format(
         "cd \"{}\" && git checkout -b \"{}\" && "
         "find . -mindepth 1 -maxdepth 1 -not -name \".git\" -exec rm -f {{}} \\; 2>/dev/null || true && "
-        "cp -r \"{}/\"* . && git add -A && git commit -m \"Base Python {} \" && "
+        "cp -r \"{}/\"* . && git add -A && git commit -m \"Base Python {}\" && "
         "git checkout {}", cfg.repo_path.string(), branch, temp_venv.string(), version, curr_br);
     if (run_shell(git_cmd.c_str()) != 0) {
         std::cerr << RED << "❌ Failed to commit base version " << version << RESET << std::endl;
