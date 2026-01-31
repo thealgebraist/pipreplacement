@@ -1,4 +1,6 @@
 spip
+.ninja_log
+.ninja_deps
 summary.log
 *.tgz
 summary.aux
@@ -8,7 +10,6 @@ summary.pdf
 __pycache__/
 *.pyc
 temp_parallel_test/*
-spip
 random_64_pkgs.txt
 stress_64_log.txt
 *.log
