@@ -58,3 +58,6 @@
     - [x] Implemented a `std::counting_semaphore` for Git operations to allow safely overlapping worktree creation (8 concurrent ops).
 - [x] **Orchestration Benchmark (`spip bench`)**: A dedicated pre-flight tool to verify thread scheduling Efficiency and telemetry mapping on high-density servers.
 - [x] **Smoke Test Flag (`--smoke`)**: Added to `matrix` and `compat` to validate the parallel execution engine before initiating long-running test suites.
+- [x] **Stall Prevention & Hardened I/O**: 
+    - [x] Integrated `timeout` and `curl` reachability flags to prevent dead connections from hanging the parallel downloader.
+    - [x] Configured `sqlite3_busy_timeout` (10s) to handle high-concurrency database contention on multi-core servers.

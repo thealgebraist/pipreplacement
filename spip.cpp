@@ -219,6 +219,8 @@ public:
             return;
         }
 
+        sqlite3_busy_timeout(db, 10000); // 10s busy timeout for high-concurrency DB access
+
         const char* sql = "CREATE TABLE IF NOT EXISTS telemetry ("
                           "test_id TEXT, timestamp REAL, core_id INTEGER, cpu_user REAL, cpu_sys REAL, "
                           "mem_kb INTEGER, net_in INTEGER, net_out INTEGER, disk_read INTEGER, disk_write INTEGER, "
@@ -1111,7 +1113,8 @@ void resolve_and_install(const Config& cfg, const std::vector<std::string>& targ
                 partial += ".part";
                 // Only show progress bars if not in high-concurrency mode to avoid garbled output
                 bool quiet = (std::thread::hardware_concurrency() > 8);
-                std::string dl_cmd = std::format("curl -L -s {} {} -o {}", 
+                // Respecting user rule for external command timeouts, but using a larger window for large wheels
+                std::string dl_cmd = std::format("timeout 300 curl -L --connect-timeout 10 --max-time 240 -s {} {} -o {}", 
                     quiet ? "" : "-#", quote_arg(info.wheel_url), quote_arg(partial.string()));
                 std::system(dl_cmd.c_str());
                 if (fs::exists(partial)) {
@@ -1697,7 +1700,7 @@ int benchmark_concurrency(const Config& cfg) {
         std::vector<std::thread> workers;
         for (int i = 0; i < c; ++i) {
             workers.emplace_back([&, i]() {
-                std::string cmd = std::format("curl -L -s {} -o {}_{}", test_url, tmp.string(), i);
+                std::string cmd = std::format("timeout 30 curl -L --connect-timeout 5 --max-time 20 -s {} -o {}_{}", test_url, tmp.string(), i);
                 std::system(cmd.c_str());
             });
         }
@@ -1752,7 +1755,8 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
             }
             
             fs::path target = cfg.spip_root / (info.name + "-" + info.version + ".whl");
-            std::string cmd = std::format("curl -L -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(target.string()));
+            // Wrap in timeout to prevent stall on dead connections
+            std::string cmd = std::format("timeout 300 curl -L --connect-timeout 10 --max-time 240 -s -# {} -o {}", quote_arg(info.wheel_url), quote_arg(target.string()));
             int ret = std::system(cmd.c_str());
             
             if (g_interrupted || ret != 0) {
