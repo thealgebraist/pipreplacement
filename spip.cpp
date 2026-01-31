@@ -2009,7 +2009,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     }
 
     // PARALLEL SETUP
-    unsigned int max_threads = std::thread::hardware_concurrency(); if(max_threads==0) max_threads=4;
+    unsigned int max_threads = cfg.concurrency; if(max_threads==0) max_threads=4;
     std::cout << MAGENTA << "⚡ Parallel execution with " << max_threads << " threads." << RESET << std::endl;
     
     std::atomic<size_t> g_idx{0};
@@ -3426,6 +3426,12 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         
         Config m_cfg = cfg;
         m_cfg.telemetry = telemetry;
+        // Default to hardware_concurrency if not overridden
+        for (size_t i = 1; i < args.size(); ++i) {
+             if ((args[i] == "--threads" || args[i] == "-j") && i + 1 < args.size()) {
+                 m_cfg.concurrency = std::stoi(args[++i]);
+             }
+        }
         matrix_test(m_cfg, pkg, test_script, python_ver, profile, no_cleanup, revision_limit, test_all_revisions, false);
     }
     else if (command == "compat") {
@@ -3461,6 +3467,11 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         
         Config m_cfg = cfg;
         m_cfg.telemetry = telemetry;
+        for (size_t i = 2; i < args.size(); ++i) {
+             if ((args[i] == "--threads" || args[i] == "-j") && i + 1 < args.size()) {
+                 m_cfg.concurrency = std::stoi(args[++i]);
+             }
+        }
         matrix_test(m_cfg, pkg, "", "auto", profile, false, n_py, false, true, m_pkg);
     }
     else if (command == "profile") {
