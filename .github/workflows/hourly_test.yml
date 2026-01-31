@@ -42,16 +42,21 @@ jobs:
           mkdir -p ${HOME}/.spip/telemetry
           
           # Use timeout to ensure we stay within 10 minutes total
-          # Use --threads instead of --concurrency for safety (added support for both now)
           # Use SPIP_NO_TMPFS=1 to avoid sudo mount issues in CI
           export SPIP_NO_TMPFS=1
-          timeout 10m bash -c "
-            for pkg in $pkgs; do
-              echo '----------------------------------------'
-              echo '🧪 Testing: $pkg'
-              ./spip matrix \$pkg --limit 2 --threads 4 --telemetry
+          
+          # Convert space-separated pkgs to array
+          read -ra PKG_ARRAY <<< "$pkgs"
+          
+          timeout 10m bash -c '
+            for pkg in "${PKG_ARRAY[@]}"; do
+              echo "----------------------------------------"
+              echo "🧪 Testing: $pkg"
+              # limit to 2 versions per pkg to ensure we finish 4 pkgs in 10m
+              # use --threads 4 for parallel version testing
+              ./spip matrix "$pkg" --limit 2 --threads 4 --telemetry
             done
-          " || echo "Test reached 10 minute timeout"
+          ' PKG_ARRAY=("${PKG_ARRAY[@]}") || echo "Test reached 10 minute timeout"
 
       - name: Upload Telemetry
         if: always()

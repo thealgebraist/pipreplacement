@@ -2349,7 +2349,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
              
              // REWRITE ENTIRE BLOCK WITH CLEAN LOOP
              if (fs::exists(p_path)) {
-                 std::string pytest_flags = "--maxfail=1 -q";
+                 std::string pytest_flags = "--maxfail=1 -q --ignore=pip --import-mode=importlib";
                  bool success = false;
                  
                  std::set<std::string> applied_fixes; // Track fixes to prevent loops
@@ -3690,6 +3690,9 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
                 revision_limit = std::stoi(args[++i]);
             } else if (arg == "--all") {
                 test_all_revisions = true;
+            } else if ((arg == "--threads" || arg == "-j" || arg == "--concurrency") && i + 1 < args.size()) {
+                // Handled in second pass, but consume it here to avoid positional arg confusion
+                i++;
             } else if (arg.starts_with("--")) {
                 std::cerr << "Unknown option: " << arg << std::endl;
             } else {
