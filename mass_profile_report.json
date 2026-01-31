@@ -1,0 +1,226 @@
+{
+  "summary": {
+    "total_packages": 64,
+    "completed": 64,
+    "successfully_profiled": 64,
+    "total_instructions": 9626133,
+    "total_disk_kb": 119914,
+    "total_mem_kb": 142791
+  },
+  "hogs": {
+    "disk": [
+      [
+        "pandas",
+        29065
+      ],
+      [
+        "scipy",
+        26020
+      ],
+      [
+        "numpy",
+        11680
+      ],
+      [
+        "sqlalchemy",
+        9835
+      ],
+      [
+        "matplotlib",
+        9008
+      ],
+      [
+        "django",
+        7084
+      ],
+      [
+        "setuptools",
+        3877
+      ],
+      [
+        "pymongo",
+        2709
+      ],
+      [
+        "docutils",
+        2267
+      ],
+      [
+        "pydantic",
+        2156
+      ]
+    ],
+    "cpu": [
+      [
+        "pandas",
+        2508109
+      ],
+      [
+        "scipy",
+        1992145
+      ],
+      [
+        "numpy",
+        959151
+      ],
+      [
+        "matplotlib",
+        725853
+      ],
+      [
+        "sqlalchemy",
+        688054
+      ],
+      [
+        "django",
+        563091
+      ],
+      [
+        "setuptools",
+        313285
+      ],
+      [
+        "pymongo",
+        192997
+      ],
+      [
+        "docutils",
+        180810
+      ],
+      [
+        "pydantic",
+        174881
+      ]
+    ],
+    "mem": [
+      [
+        "pandas",
+        34804
+      ],
+      [
+        "scipy",
+        30324
+      ],
+      [
+        "numpy",
+        13603
+      ],
+      [
+        "sqlalchemy",
+        11848
+      ],
+      [
+        "matplotlib",
+        10633
+      ],
+      [
+        "django",
+        8612
+      ],
+      [
+        "setuptools",
+        4625
+      ],
+      [
+        "pymongo",
+        3247
+      ],
+      [
+        "docutils",
+        2798
+      ],
+      [
+        "pydantic",
+        2636
+      ]
+    ]
+  },
+  "redundancy": [
+    [
+      "CALL -> STORE_FAST -> LOAD_GLOBAL",
+      53677
+    ],
+    [
+      "CALL -> POP_TOP -> LOAD_GLOBAL",
+      46153
+    ],
+    [
+      "LOAD_GLOBAL -> LOAD_FAST_BORROW -> CALL",
+      42838
+    ],
+    [
+      "CALL -> POP_TOP -> LOAD_CONST(None)",
+      42132
+    ],
+    [
+      "CALL_KW -> STORE_FAST -> LOAD_GLOBAL",
+      28739
+    ],
+    [
+      "LOAD_CONST(None) -> CALL -> POP_TOP",
+      16644
+    ],
+    [
+      "LOAD_CONST(None) -> LOAD_CONST(None) -> CALL",
+      16485
+    ],
+    [
+      "LOAD_CONST(('dtype',)) -> CALL_KW -> STORE_FAST",
+      8044
+    ],
+    [
+      "LOAD_GLOBAL -> LOAD_FAST_BORROW_LOAD_FAST_BORROW -> CALL",
+      7822
+    ],
+    [
+      "LOAD_CONST(('match',)) -> CALL_KW -> COPY",
+      6223
+    ],
+    [
+      "LOAD_CONST('return') -> LOAD_CONST('None') -> BUILD_MAP",
+      5511
+    ],
+    [
+      "LOAD_CONST('None') -> BUILD_MAP -> RETURN_VALUE",
+      5511
+    ],
+    [
+      "BINARY_OP -> STORE_FAST -> LOAD_GLOBAL",
+      5443
+    ],
+    [
+      "CALL_KW -> POP_TOP -> LOAD_CONST(None)",
+      4917
+    ],
+    [
+      "LOAD_FAST_BORROW -> LOAD_CONST(('match',)) -> CALL_KW",
+      4120
+    ],
+    [
+      "LOAD_GLOBAL -> CALL -> TO_BOOL",
+      4111
+    ],
+    [
+      "LOAD_FAST_BORROW -> LOAD_GLOBAL -> CALL",
+      3466
+    ],
+    [
+      "LOAD_GLOBAL -> LOAD_ATTR -> CALL",
+      3375
+    ],
+    [
+      "CALL -> GET_AWAITABLE -> LOAD_CONST(None)",
+      1768
+    ],
+    [
+      "LOAD_CONST(None) -> RETURN_VALUE -> CALL_INTRINSIC_1",
+      1602
+    ]
+  ],
+  "static_analysis": {
+    "method1_closure_free": 150256,
+    "method2_repeated_make": 1446,
+    "method3_const_calls": 77211,
+    "method4_purity_checks": 164114
+  }
+}
