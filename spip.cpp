@@ -21,6 +21,14 @@
 #include <csignal>
 #include <sqlite3.h>
 #include <future>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/processor_info.h>
+#include <mach/mach_host.h>
+#include <net/if.h>
+#include <ifaddrs.h>
+#include <net/if_dl.h>
+#endif
 
 volatile std::atomic<bool> g_interrupted{false};
 
@@ -101,6 +109,7 @@ struct Config {
         fs::path db_file;
 		std::string pypi_mirror = "https://pypi.org"; // Default
         int concurrency = std::thread::hardware_concurrency(); 
+        bool telemetry = false;
 };
 
 class ErrorKnowledgeBase {
@@ -174,6 +183,130 @@ public:
         }
         sqlite3_finalize(stmt);
         return fixes;
+    }
+};
+
+class TelemetryLogger {
+    const Config& cfg;
+    std::string test_id;
+    std::atomic<bool> running{false};
+    std::thread worker;
+    sqlite3* db = nullptr;
+
+public:
+    TelemetryLogger(const Config& c, const std::string& id) : cfg(c), test_id(id) {
+        fs::path db_path = cfg.spip_root / "telemetry.db";
+        if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
+            std::cerr << "❌ Failed to open telemetry database." << std::endl;
+            return;
+        }
+
+        const char* sql = "CREATE TABLE IF NOT EXISTS telemetry ("
+                          "test_id TEXT, timestamp REAL, core_id INTEGER, cpu_user REAL, cpu_sys REAL, "
+                          "mem_kb INTEGER, net_in INTEGER, net_out INTEGER, disk_read INTEGER, disk_write INTEGER, "
+                          "iowait REAL);";
+        sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    }
+
+    ~TelemetryLogger() {
+        stop();
+        if (db) sqlite3_close(db);
+    }
+
+    void start() {
+        if (running) return;
+        running = true;
+        worker = std::thread(&TelemetryLogger::loop, this);
+    }
+
+    void stop() {
+        if (!running) return;
+        running = false;
+        if (worker.joinable()) worker.join();
+    }
+
+private:
+    void loop() {
+        while (running) {
+            auto start_time = std::chrono::steady_clock::now();
+            sample();
+            auto end_time = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            if (elapsed < std::chrono::milliseconds(100)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100) - elapsed);
+            }
+        }
+    }
+
+    void sample() {
+        double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        
+        #ifdef __APPLE__
+        natural_t cpuCount;
+        processor_info_array_t infoArray;
+        mach_msg_type_number_t infoCount;
+        kern_return_t kr = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &cpuCount, &infoArray, &infoCount);
+        
+        static std::vector<uint64_t> last_user(128, 0), last_sys(128, 0), last_idle(128, 0);
+
+        if (kr == KERN_SUCCESS) {
+            for (natural_t i = 0; i < cpuCount; ++i) {
+                uint64_t u = infoArray[i * CPU_STATE_MAX + CPU_STATE_USER];
+                uint64_t s = infoArray[i * CPU_STATE_MAX + CPU_STATE_SYSTEM];
+                uint64_t id = infoArray[i * CPU_STATE_MAX + CPU_STATE_IDLE];
+                
+                double du = (u > last_user[i]) ? (double)(u - last_user[i]) : 0;
+                double ds = (s > last_sys[i]) ? (double)(s - last_sys[i]) : 0;
+                
+                last_user[i] = u; last_sys[i] = s; last_idle[i] = id;
+                
+                log_to_db(ts, (int)i, du, ds, 0, 0, 0, 0, 0, 0); 
+            }
+            vm_deallocate(mach_task_self(), (vm_address_t)infoArray, infoCount * sizeof(int));
+        }
+
+        // Memory
+        mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
+        vm_statistics_data_t vm_stats;
+        if (host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&vm_stats, &count) == KERN_SUCCESS) {
+            long used_mem = (vm_stats.active_count + vm_stats.wire_count) * (vm_page_size / 1024);
+            log_to_db(ts, -1, 0, 0, used_mem, 0, 0, 0, 0, 0);
+        }
+
+        // Net (simplified, sum of all interfaces)
+        struct ifaddrs *ifa_list = nullptr, *ifa;
+        if (getifaddrs(&ifa_list) == 0) {
+            uint64_t ibytes = 0, obytes = 0;
+            for (ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
+                if (ifa->ifa_addr->sa_family == AF_LINK) {
+                    struct if_data *ifd = (struct if_data *)ifa->ifa_data;
+                    ibytes += ifd->ifi_ibytes;
+                    obytes += ifd->ifi_obytes;
+                }
+            }
+            log_to_db(ts, -2, 0, 0, 0, (long)ibytes, (long)obytes, 0, 0, 0);
+            freeifaddrs(ifa_list);
+        }
+        #endif
+    }
+
+    void log_to_db(double ts, int core, double u, double s, long mem, long ni, long no, long dr, long dw, double wait) {
+        sqlite3_stmt* stmt;
+        const char* sql = "INSERT INTO telemetry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, test_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 2, ts);
+        sqlite3_bind_int(stmt, 3, core);
+        sqlite3_bind_double(stmt, 4, u);
+        sqlite3_bind_double(stmt, 5, s);
+        sqlite3_bind_int64(stmt, 6, mem);
+        sqlite3_bind_int64(stmt, 7, ni);
+        sqlite3_bind_int64(stmt, 8, no);
+        sqlite3_bind_int64(stmt, 9, dr);
+        sqlite3_bind_int64(stmt, 10, dw);
+        sqlite3_bind_double(stmt, 11, wait);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
     }
 };
 
@@ -1457,9 +1590,47 @@ std::map<std::string, PackageInfo> resolve_only(const std::vector<std::string>& 
     return resolved;
 }
 
+int benchmark_concurrency(const Config& cfg) {
+    std::cout << MAGENTA << "🔍 Benchmarking network for optimal download concurrency..." << RESET << std::endl;
+    std::vector<int> tests = {1, 4, 8, 16, 32};
+    std::string test_url = "https://files.pythonhosted.org/packages/ef/b5/b4b38202d659a11ff928174ad4ec0725287f3b89b88f343513a8dd645d94/idna-3.7-py3-none-any.whl";
+    fs::path tmp = cfg.spip_root / "bench.whl";
+    
+    int best_c = 4;
+    double min_time = 1e9;
+
+    for (int c : tests) {
+        if (c > (int)std::thread::hardware_concurrency() * 4) break;
+        
+        auto start = std::chrono::steady_clock::now();
+        std::vector<std::thread> workers;
+        for (int i = 0; i < c; ++i) {
+            workers.emplace_back([&, i]() {
+                std::string cmd = std::format("curl -L -s {} -o {}_{}", test_url, tmp.string(), i);
+                std::system(cmd.c_str());
+            });
+        }
+        for (auto& t : workers) t.join();
+        auto end = std::chrono::steady_clock::now();
+        double d = std::chrono::duration<double>(end - start).count();
+        std::cout << "  - " << c << " threads: " << YELLOW << d << "s" << RESET << std::endl;
+        
+        if (d < min_time) {
+            min_time = d;
+            best_c = c;
+        }
+        // Cleanup
+        for (int i = 0; i < c; ++i) {
+            fs::path p = std::format("{}_{}", tmp.string(), i);
+            if (fs::exists(p)) fs::remove(p);
+        }
+    }
+    std::cout << GREEN << "✨ Optimized download concurrency: " << best_c << RESET << std::endl;
+    return best_c;
+}
+
 void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_list) {
     if (info_list.empty()) return;
-    std::cout << MAGENTA << "📥 Downloading " << info_list.size() << " unique wheels in parallel (concurrency: 4)..." << RESET << std::endl;
     
     std::queue<PackageInfo> q;
     for (const auto& info : info_list) {
@@ -1471,6 +1642,9 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
         std::cout << GREEN << "✨ All wheels already cached." << RESET << std::endl;
         return;
     }
+
+    int concurrency = benchmark_concurrency(cfg);
+    std::cout << MAGENTA << "📥 Downloading " << q.size() << " unique wheels (concurrency: " << concurrency << ")..." << RESET << std::endl;
 
     std::mutex m;
     std::atomic<int> completed{0};
@@ -1503,7 +1677,7 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
     };
 
     std::vector<std::thread> threads;
-    for (int i = 0; i < 4; ++i) threads.emplace_back(worker);
+    for (int i = 0; i < concurrency; ++i) threads.emplace_back(worker);
     for (auto& t : threads) t.join();
     
     if (g_interrupted) {
@@ -1604,12 +1778,18 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     std::cout << CYAN << "📋 Configuration Info:" << RESET << std::endl;
     std::cout << "  - Package:         " << BOLD << pkg << RESET << std::endl;
     std::cout << "  - Latest Version:  " << latest_info.version << std::endl;
-    if (!vary_python) std::cout << "  - Python Req:      " << (latest_info.requires_python.empty() ? "None" : latest_info.requires_python) << std::endl;
     std::cout << "  - Matrix Size:     " << versions.size() << (vary_python ? " combinations" : " versions to test") << std::endl;
     if (python_version != "auto") {
         std::cout << "  - Python Mode:     Manual Override (" << python_version << ")" << std::endl;
     } else {
         std::cout << "  - Python Mode:     Automatic (from metadata)" << std::endl;
+    }
+
+    std::string test_run_id = pkg + "_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    TelemetryLogger* telemetry = cfg.telemetry ? new TelemetryLogger(cfg, test_run_id) : nullptr;
+    if (telemetry) {
+        std::cout << YELLOW << "📡 Telemetry logging started (10 samples/sec)..." << RESET << std::endl;
+        telemetry->start();
     }
 
     // Proceed to download and test if there are versions to process
@@ -2293,6 +2473,12 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                 seen_fixes.insert(key);
             }
         }
+    }
+
+    if (telemetry) {
+        telemetry->stop();
+        delete telemetry;
+        std::cout << YELLOW << "📡 Telemetry logging stopped. Database updated: " << (cfg.spip_root / "telemetry.db") << RESET << std::endl;
     }
 }
 
@@ -3185,9 +3371,11 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         int n_py = 3; 
         int m_pkg = 1;
         bool profile = false;
+        bool telemetry = false;
         
         for (size_t i = 2; i < args.size(); ++i) {
             if (args[i] == "--profile") profile = true;
+            else if (args[i] == "--telemetry") telemetry = true;
             else if (args[i] == "--py" && i + 1 < args.size()) n_py = std::stoi(args[++i]);
             else if (args[i] == "--pkg" && i + 1 < args.size()) m_pkg = std::stoi(args[++i]);
             else {
@@ -3198,7 +3386,9 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
             }
         }
         
-        matrix_test(cfg, pkg, "", "auto", profile, false, n_py, false, true, m_pkg);
+        Config m_cfg = cfg;
+        m_cfg.telemetry = telemetry;
+        matrix_test(m_cfg, pkg, "", "auto", profile, false, n_py, false, true, m_pkg);
     }
     else if (command == "profile") {
         if (!require_args(args, 2, "Usage: spip profile <pkg> [--ai|--review]")) return;
