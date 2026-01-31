@@ -7,7 +7,8 @@ void create_base_version(const Config& cfg, const std::string& version) {
     std::string safe_v = ""; for(char c : version) if(std::isalnum(c) || c == '.') safe_v += c;
     fs::path temp_venv = cfg.spip_root / ("temp_venv_" + safe_v);
     std::string python_bin = ensure_python_bin(cfg, safe_v);
-    if (run_shell(std::format("{} -m venv {}", quote_arg(python_bin), quote_arg(temp_venv.string()))).c_str()) {
+    std::string venv_cmd = std::format("{} -m venv {}", quote_arg(python_bin), quote_arg(temp_venv.string()));
+    if (run_shell(venv_cmd.c_str()) != 0) {
         std::cerr << RED << "❌ Failed to create venv with " << python_bin << RESET << std::endl; std::exit(1);
     }
     std::string curr_br_cmd = "git symbolic-ref --short HEAD 2>/dev/null || echo HEAD";

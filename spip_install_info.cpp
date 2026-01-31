@@ -31,7 +31,7 @@ PackageInfo get_package_info(const std::string& pkg, const std::string& version,
             size_t cur = content.find("[", ver_entry) + 1; int bal = 1;
             while (cur < content.size() && bal > 0) { if (content[cur] == '[') bal++; else if (content[cur] == ']') bal--; cur++; }
             std::string release_data = content.substr(content.find("[", ver_entry), cur - content.find("[", ver_entry));
-            std::regex url_re("\"url\":\s*\"(https://[^\"]*\.whl)\""); auto wheels_begin = std::sregex_iterator(release_data.begin(), release_data.end(), url_re);
+            std::regex url_re(R"(\"url\":\s*\"(https\://[^\"]*\.whl)\")"); auto wheels_begin = std::sregex_iterator(release_data.begin(), release_data.end(), url_re);
             int best_score = -1; for (auto it = wheels_begin; it != std::sregex_iterator(); ++it) {
                 std::string url = (*it)[1].str(); int s = score_wheel(url, target_py); if (s > best_score) { best_score = s; info.wheel_url = url; }
             }
