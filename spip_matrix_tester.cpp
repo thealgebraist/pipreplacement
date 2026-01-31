@@ -18,5 +18,5 @@ void MatrixTester::run(const std::string& custom_test_script, const std::string&
     for(auto& f : futures) f.wait();
     std::vector<PackageInfo> info_list; for (const auto& [id, info] : all_needed) info_list.push_back(info);
     parallel_download(cfg, info_list);
-    // ... (continued)
+    run_execution_phase(custom_test_script, python_version, profile, no_cleanup, revision_limit, test_all_revisions, vary_python, pkg_revision_limit, pinned_pkg_ver);
 }

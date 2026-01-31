@@ -2,36 +2,35 @@ CXX = g++
 CXXFLAGS = -std=c++23 -O3 -Wall -Wextra -pedantic -I.
 LDFLAGS = -lsqlite3
 
-SRCS = spip_globals.cpp spip_utils.cpp spip_utils_shell.cpp spip_utils_exec.cpp \
-       ResourceProfiler.cpp get_dir_size.cpp \
-       ErrorKnowledgeBase.cpp ErrorKnowledgeBase_store.cpp ErrorKnowledgeBase_lookup.cpp ErrorKnowledgeBase_fixes.cpp \
-       TelemetryLogger.cpp TelemetryLogger_methods.cpp TelemetryLogger_loop.cpp \
-       TelemetryLogger_sample_apple.cpp TelemetryLogger_sample_linux.cpp TelemetryLogger_log.cpp \
-       spip_env.cpp spip_env_dirs.cpp spip_env_git.cpp spip_env_setup.cpp spip_env_helpers.cpp \
-       spip_python.cpp spip_python_bin.cpp spip_python_base.cpp spip_python_req.cpp \
-       spip_db.cpp spip_db_fetch.cpp spip_db_json.cpp spip_db_vers.cpp \
-       spip_install_wheel.cpp spip_install_info.cpp spip_install_main.cpp spip_install_single.cpp \
-       spip_install_ops.cpp spip_install_prune.cpp \
-       spip_test_tree.cpp spip_test_pkg.cpp spip_test_boot.cpp spip_test_utils.cpp \
-       spip_test_ai.cpp spip_test_trim.cpp spip_test_exc.cpp \
-       spip_matrix_test_func.cpp spip_matrix_tester.cpp spip_matrix_tester_impl.cpp \
-       spip_matrix_select.cpp spip_matrix_dl.cpp spip_matrix_resolve.cpp \
-       spip_matrix_par.cpp spip_matrix_summary.cpp spip_matrix_bench.cpp \
-       spip_distributed.cpp spip_worker.cpp spip_mirrors.cpp spip_cmd.cpp spip_main.cpp
+OBJS = spip_globals.o spip_utils.o spip_utils_shell.o spip_utils_exec.o \
+       ResourceProfiler.o get_dir_size.o \
+       ErrorKnowledgeBase.o ErrorKnowledgeBase_store.o ErrorKnowledgeBase_lookup.o ErrorKnowledgeBase_fixes.o \
+       TelemetryLogger.o TelemetryLogger_methods.o TelemetryLogger_loop.o \
+       TelemetryLogger_sample_apple.o TelemetryLogger_sample_linux.o TelemetryLogger_log.o \
+       spip_env.o spip_env_dirs.o spip_env_git.o spip_env_setup.o spip_env_helpers.o \
+       spip_env_cleanup.o spip_env_cleanup_envs.o \
+       spip_python.o spip_python_bin.o spip_python_base.o spip_python_req.o \
+       spip_db.o spip_db_fetch.o spip_db_json.o spip_db_vers.o \
+       spip_install_wheel.o spip_install_info.o spip_install_main.o spip_install_single.o \
+       spip_install_ops.o spip_install_prune.o \
+       spip_test_tree.o spip_test_pkg.o spip_test_boot.o spip_test_utils.o \
+       spip_test_ai.o spip_test_trim.o spip_test_exc.o \
+       spip_matrix_test_func.o spip_matrix_tester.o spip_matrix_tester_impl.o \
+       spip_matrix_select.o spip_matrix_dl.o spip_matrix_resolve.o \
+       spip_matrix_par.o spip_matrix_summary.o spip_matrix_bench.o \
+       spip_distributed.o spip_worker.o spip_mirrors.o \
+       spip_top.o spip_top_refs.o \
+       spip_cmd.o spip_cmd_install.o spip_cmd_maint.o spip_cmd_matrix.o \
+       spip_cmd_top.o spip_cmd_uninstall.o \
+       spip_bundle.o spip_bundle_gen.o spip_main.o
 
-OBJDIR = build
-OBJS = $(addprefix $(OBJDIR)/, $(SRCS:.cpp=.o))
-
-all: $(OBJDIR) spip
-
-$(OBJDIR):
-	mkdir -p $(OBJDIR)
+all: spip
 
 spip: $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS)
 
-$(OBJDIR)/%.o: %.cpp
+%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(OBJDIR) spip
+	rm -f $(OBJS) spip

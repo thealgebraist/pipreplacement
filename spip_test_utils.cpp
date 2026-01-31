@@ -8,7 +8,7 @@ void freeze_environment(const Config& cfg, const std::string& output_file) {
         return;
     }
     std::cout << MAGENTA << "🧊 Freezing environment to " << output_file << "..." << RESET << std::endl;
-    const std::string cmd = std::format("tar -czf \"{output_file}\" -C \"{sp.string()}\" . -C \"{cfg.project_env_path.string()}\" pyvenv.cfg");
+    const std::string cmd = std::format("tar -czf \"{}\" -C \"{}\" . -C \"{}\" pyvenv.cfg", output_file, sp.string(), cfg.project_env_path.string());
     if (run_shell(cmd.c_str()) == 0) {
         std::cout << GREEN << "✨ Environment frozen successfully!" << RESET << std::endl;
     }
@@ -20,6 +20,6 @@ void audit_environment(const Config& cfg) {
     std::cout << MAGENTA << "🛡 Performing security audit (OSV API)..." << RESET << std::endl;
     const fs::path h = cfg.spip_root / "scripts" / "audit_helper.py";
     const fs::path py = cfg.project_env_path / "bin" / "python";
-    const std::string cmd = std::format("\"{py.string()}\" \"{h.string()}\" \"{sp.string()}"", py.string(), h.string(), sp.string());
+    const std::string cmd = std::format("{} {} {}", quote_arg(py.string()), quote_arg(h.string()), quote_arg(sp.string()));
     run_shell(cmd.c_str());
 }

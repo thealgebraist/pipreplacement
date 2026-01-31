@@ -2,6 +2,8 @@ cxx = g++
 cxxflags = -std=c++23 -O3 -Wall -Wextra -pedantic -I.
 ldflags = -lsqlite3
 
+include spip_sources.ninja
+
 rule compile
   command = $cxx $cxxflags -c $in -o $out
   description = CC $out
@@ -31,6 +33,8 @@ build spip_env_dirs.o: compile spip_env_dirs.cpp
 build spip_env_git.o: compile spip_env_git.cpp
 build spip_env_setup.o: compile spip_env_setup.cpp
 build spip_env_helpers.o: compile spip_env_helpers.cpp
+build spip_env_cleanup.o: compile spip_env_cleanup.cpp
+build spip_env_cleanup_envs.o: compile spip_env_cleanup_envs.cpp
 build spip_python.o: compile spip_python.cpp
 build spip_python_bin.o: compile spip_python_bin.cpp
 build spip_python_base.o: compile spip_python_base.cpp
@@ -65,8 +69,13 @@ build spip_distributed.o: compile spip_distributed.cpp
 build spip_worker.o: compile spip_worker.cpp
 build spip_mirrors.o: compile spip_mirrors.cpp
 build spip_cmd.o: compile spip_cmd.cpp
+build spip_cmd_install.o: compile spip_cmd_install.cpp
+build spip_cmd_maint.o: compile spip_cmd_maint.cpp
+build spip_cmd_matrix.o: compile spip_cmd_matrix.cpp
+build spip_bundle.o: compile spip_bundle.cpp
+build spip_bundle_gen.o: compile spip_bundle_gen.cpp
 build spip_main.o: compile spip_main.cpp
 
-build spip: link spip_globals.o spip_utils.o spip_utils_shell.o spip_utils_exec.o ResourceProfiler.o get_dir_size.o ErrorKnowledgeBase.o ErrorKnowledgeBase_store.o ErrorKnowledgeBase_lookup.o ErrorKnowledgeBase_fixes.o TelemetryLogger.o TelemetryLogger_methods.o TelemetryLogger_loop.o TelemetryLogger_sample_apple.o TelemetryLogger_sample_linux.o TelemetryLogger_log.o spip_env.o spip_env_dirs.o spip_env_git.o spip_env_setup.o spip_env_helpers.o spip_python.o spip_python_bin.o spip_python_base.o spip_python_req.o spip_db.o spip_db_fetch.o spip_db_json.o spip_db_vers.o spip_install_wheel.o spip_install_info.o spip_install_main.o spip_install_single.o spip_install_ops.o spip_install_prune.o spip_test_tree.o spip_test_pkg.o spip_test_boot.o spip_test_utils.o spip_test_ai.o spip_test_trim.o spip_test_exc.o spip_matrix_test_func.o spip_matrix_tester.o spip_matrix_tester_impl.o spip_matrix_select.o spip_matrix_dl.o spip_matrix_resolve.o spip_matrix_par.o spip_matrix_summary.o spip_matrix_bench.o spip_distributed.o spip_worker.o spip_mirrors.o spip_cmd.o spip_main.o
+build spip: link $objs
 
 default spip

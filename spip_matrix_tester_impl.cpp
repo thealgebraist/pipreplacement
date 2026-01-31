@@ -1,7 +1,7 @@
 #include "spip_matrix_tester.h"
 #include "spip_env.h"
 
-void MatrixTester::run(const std::string& custom_test_script, const std::string& python_version, bool profile, bool no_cleanup, int revision_limit, bool test_all_revisions, bool vary_python, int pkg_revision_limit, const std::string& pinned_pkg_ver) {
+void MatrixTester::run_execution_phase(const std::string& custom_test_script, const std::string& python_version, bool profile, bool no_cleanup, int revision_limit, bool test_all_revisions, bool vary_python, int pkg_revision_limit, const std::string& pinned_pkg_ver) {
     // ... (logic from spip_matrix_tester.cpp continued)
     // Storage for Wheels
     std::string wb = "wheels"; if (branch_exists(cfg, wb) || run_shell(std::format("cd {} && git branch {}", quote_arg(cfg.repo_path.string()), wb).c_str()) == 0) {
