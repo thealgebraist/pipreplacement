@@ -251,7 +251,7 @@ private:
         mach_msg_type_number_t infoCount;
         kern_return_t kr = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &cpuCount, &infoArray, &infoCount);
         
-        static std::vector<uint64_t> last_user(128, 0), last_sys(128, 0), last_idle(128, 0);
+        static std::vector<uint64_t> last_user(512, 0), last_sys(512, 0), last_idle(512, 0);
 
         if (kr == KERN_SUCCESS) {
             for (natural_t i = 0; i < cpuCount; ++i) {
@@ -1962,7 +1962,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
     std::cout << MAGENTA << "⚡ Parallel execution with " << max_threads << " threads." << RESET << std::endl;
     
     std::atomic<size_t> g_idx{0};
-    std::mutex m_out, m_res, m_state, m_base_sync;
+    std::mutex m_out, m_res, m_state, m_base_sync, m_git;
     std::vector<std::thread> workers;
     ErrorKnowledgeBase kb(cfg.db_file);
     
@@ -2013,43 +2013,48 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
                 std::unique_ptr<ResourceProfiler> v_prof = profile ? std::make_unique<ResourceProfiler>(matrix_path) : nullptr;
         
 
-        // Setup/Refresh worktree
-        std::string base_branch = "base/" + target_py;
-        
-        // Sync base branch creation
-        bool exists = false;
-        {
-            std::lock_guard<std::mutex> l(m_base_sync);
-            exists = branch_exists(cfg, base_branch);
-        }
-        
-        if (!exists) {
-            {
-                std::lock_guard<std::mutex> l(m_out);
-                std::cout << YELLOW << "⚠️ Base version " << target_py << " not found. Attempting to bootstrap..." << RESET << std::endl;
-            }
-            std::lock_guard<std::mutex> l(m_base_sync);
-            if (!branch_exists(cfg, base_branch)) {
-                create_base_version(cfg, target_py);
-            }
-        }
+                // Setup/Refresh worktree
+                std::string base_branch = "base/" + target_py;
+                
+                // Sync base branch creation
+                bool exists = false;
+                {
+                    std::lock_guard<std::mutex> l(m_base_sync);
+                    exists = branch_exists(cfg, base_branch);
+                }
+                
+                if (!exists) {
+                    {
+                        std::lock_guard<std::mutex> l(m_out);
+                        std::cout << YELLOW << "⚠️ Base version " << target_py << " not found. Attempting to bootstrap..." << RESET << std::endl;
+                    }
+                    std::lock_guard<std::mutex> l(m_base_sync);
+                    if (!branch_exists(cfg, base_branch)) {
+                        create_base_version(cfg, target_py);
+                    }
+                }
 
-        // Always create fresh worktree (we deleted it above)
-        // If "already registered" error occurs, we need to prune.
-        std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
-             quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
-             
-        if (std::system(wt_cmd.c_str()) != 0) {
-             // Likely stale metadata. Prune safely.
-             { 
-                 std::lock_guard<std::mutex> l(m_out);
-                 std::system(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
-             }
-             // Retry
-             std::error_code ec_retry;
-             if (fs::exists(matrix_path, ec_retry)) fs::remove_all(matrix_path, ec_retry);
-             std::system(wt_cmd.c_str());
-        }
+                // High-concurrency Git operations need serialization to prevent index.lock failures
+                {
+                    std::lock_guard<std::mutex> l_git(m_git);
+                    std::string wt_cmd = std::format("cd {} && git worktree add --detach {} {}", 
+                         quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()), quote_arg(base_branch));
+                         
+                    if (std::system(wt_cmd.c_str()) != 0) {
+                         // Explicitly remove existing registration if "already exists" error occurred
+                         std::string rm_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", 
+                             quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()));
+                         std::system(rm_cmd.c_str());
+                         std::system(std::format("cd {} && git worktree prune", quote_arg(cfg.repo_path.string())).c_str());
+                         
+                         // Retry
+                         std::error_code ec_retry;
+                         if (fs::exists(matrix_path, ec_retry)) fs::remove_all(matrix_path, ec_retry);
+                         if (std::system(wt_cmd.c_str()) != 0) {
+                             throw std::runtime_error("Failed to add git worktree even after cleanup.");
+                         }
+                    }
+                }
 
         Config m_cfg = cfg;
         m_cfg.project_env_path = matrix_path;
@@ -2376,6 +2381,7 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
         // Thread-local cleanup necessary for parallel unique paths
         if (!no_cleanup) {
+             std::lock_guard<std::mutex> l_git(m_git);
              std::string rm_cmd = std::format("cd {} && git worktree remove --force {} 2>/dev/null", quote_arg(cfg.repo_path.string()), quote_arg(matrix_path.string()));
              std::system(rm_cmd.c_str());
         }

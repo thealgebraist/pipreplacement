@@ -49,4 +49,7 @@
     - [x] **AI Resource Optimization**: `spip profile <pkg> --ai` uses Gemini to review the top 32 hotspots and suggest improvements to lower resource use.
     - [x] **Redundancy Analysis**: Detects repeated constant subexpressions (e.g., BUILD_MAP, BUILD_TUPLE) and suggests singleton/static optimization.
 - [x] **Resource Hog Study**: Conducted a study of 64 top packages to identify common resource hogs. Generated a PDF report with architectural suggestions.
-- [x] **Multi-Version Testing (`spip compat`)**: Implement feature to test a package against N latest Python versions to ensure compatibility.
+- [x] **High-Performance Telemetry (`spip compat --telemetry`)**: 10Hz sampling of per-core CPU, memory, network, and disk I/O logged to SQLite.
+- [x] **Dynamic Download Concurrency**: Automated benchmarking for optimal thread sizing based on network probe (1-32 threads).
+- [x] **Hardened Parallel Matrix**: Robust filesystem operations with `std::error_code` and multi-layered exception handling for stable 800+ test runs.
+- [x] **Ninja Build Integration**: Transitioned to Ninja for ultra-fast incremental builds.
