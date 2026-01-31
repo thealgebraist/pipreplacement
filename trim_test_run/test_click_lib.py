@@ -1,1 +1,0 @@
-import click; print('click loaded')

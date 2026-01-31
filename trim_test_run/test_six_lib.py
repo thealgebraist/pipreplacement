@@ -1,1 +1,0 @@
-import six; print('six loaded')

@@ -1,1 +1,0 @@
-import idna; print('idna loaded')

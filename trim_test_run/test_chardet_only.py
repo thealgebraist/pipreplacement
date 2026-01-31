@@ -1,1 +1,0 @@
-import chardet; print('chardet loaded')
