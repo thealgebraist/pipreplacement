@@ -53,3 +53,8 @@
 - [x] **Dynamic Download Concurrency**: Automated benchmarking for optimal thread sizing based on network probe (1-32 threads).
 - [x] **Hardened Parallel Matrix**: Robust filesystem operations with `std::error_code` and multi-layered exception handling for stable 800+ test runs.
 - [x] **Ninja Build Integration**: Transitioned to Ninja for ultra-fast incremental builds.
+- [x] **100+ Core Optimization**: 
+    - [x] Replaced global download locks with granular per-wheel mutexes for 100% parallel dependency resolution.
+    - [x] Implemented a `std::counting_semaphore` for Git operations to allow safely overlapping worktree creation (8 concurrent ops).
+- [x] **Orchestration Benchmark (`spip bench`)**: A dedicated pre-flight tool to verify thread scheduling Efficiency and telemetry mapping on high-density servers.
+- [x] **Smoke Test Flag (`--smoke`)**: Added to `matrix` and `compat` to validate the parallel execution engine before initiating long-running test suites.

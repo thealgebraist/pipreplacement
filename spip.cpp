@@ -200,9 +200,19 @@ class TelemetryLogger {
     std::atomic<bool> running{false};
     std::thread worker;
     sqlite3* db = nullptr;
+    sqlite3_stmt* insert_stmt = nullptr;
+
+    const size_t MAX_CORES = 1024;
+    std::vector<uint64_t> last_user_vec;
+    std::vector<uint64_t> last_sys_vec;
+    std::vector<uint64_t> last_io_vec;
+    uint64_t last_net_in = 0, last_net_out = 0;
 
 public:
-    TelemetryLogger(const Config& c, const std::string& id) : cfg(c), test_id(id) {
+    TelemetryLogger(const Config& c, const std::string& id) 
+        : cfg(c), test_id(id), 
+          last_user_vec(MAX_CORES, 0), last_sys_vec(MAX_CORES, 0), last_io_vec(MAX_CORES, 0) 
+    {
         fs::path db_path = cfg.spip_root / "telemetry.db";
         if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
             std::cerr << "❌ Failed to open telemetry database." << std::endl;
@@ -214,10 +224,14 @@ public:
                           "mem_kb INTEGER, net_in INTEGER, net_out INTEGER, disk_read INTEGER, disk_write INTEGER, "
                           "iowait REAL);";
         sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+
+        const char* insert_sql = "INSERT INTO telemetry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_prepare_v2(db, insert_sql, -1, &insert_stmt, nullptr);
     }
 
     ~TelemetryLogger() {
         stop();
+        if (insert_stmt) sqlite3_finalize(insert_stmt);
         if (db) sqlite3_close(db);
     }
 
@@ -249,24 +263,24 @@ private:
     void sample() {
         double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
         
+        sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+
         #ifdef __APPLE__
         natural_t cpuCount;
         processor_info_array_t infoArray;
         mach_msg_type_number_t infoCount;
         kern_return_t kr = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &cpuCount, &infoArray, &infoCount);
         
-        static std::vector<uint64_t> last_user(512, 0), last_sys(512, 0), last_idle(512, 0);
-
         if (kr == KERN_SUCCESS) {
-            for (natural_t i = 0; i < cpuCount; ++i) {
+            for (natural_t i = 0; i < cpuCount && i < MAX_CORES; ++i) {
                 uint64_t u = infoArray[i * CPU_STATE_MAX + CPU_STATE_USER];
                 uint64_t s = infoArray[i * CPU_STATE_MAX + CPU_STATE_SYSTEM];
                 uint64_t id = infoArray[i * CPU_STATE_MAX + CPU_STATE_IDLE];
                 
-                double du = (u > last_user[i]) ? (double)(u - last_user[i]) : 0;
-                double ds = (s > last_sys[i]) ? (double)(s - last_sys[i]) : 0;
+                double du = (u > last_user_vec[i]) ? (double)(u - last_user_vec[i]) : 0;
+                double ds = (s > last_sys_vec[i]) ? (double)(s - last_sys_vec[i]) : 0;
                 
-                last_user[i] = u; last_sys[i] = s; last_idle[i] = id;
+                last_user_vec[i] = u; last_sys_vec[i] = s;
                 
                 log_to_db(ts, (int)i, du, ds, 0, 0, 0, 0, 0, 0); 
             }
@@ -281,7 +295,7 @@ private:
             log_to_db(ts, -1, 0, 0, used_mem, 0, 0, 0, 0, 0);
         }
 
-        // Net (simplified, sum of all interfaces)
+        // Net
         struct ifaddrs *ifa_list = nullptr, *ifa;
         if (getifaddrs(&ifa_list) == 0) {
             uint64_t ibytes = 0, obytes = 0;
@@ -292,34 +306,36 @@ private:
                     obytes += ifd->ifi_obytes;
                 }
             }
-            log_to_db(ts, -2, 0, 0, 0, (long)ibytes, (long)obytes, 0, 0, 0);
+            log_to_db(ts, -2, 0, 0, 0, (long)(ibytes - last_net_in), (long)(obytes - last_net_out), 0, 0, 0);
+            last_net_in = ibytes; last_net_out = obytes;
             freeifaddrs(ifa_list);
         }
         #elif defined(__linux__)
         // CPU (/proc/stat)
         std::ifstream stat("/proc/stat");
         std::string line;
-        static std::vector<uint64_t> last_total(512, 0), last_user_lnx(512, 0), last_sys_lnx(512, 0);
         while (std::getline(stat, line) && line.starts_with("cpu")) {
             if (line.starts_with("cpu ")) continue; // Skip aggregate
             std::stringstream ss(line);
             std::string cpu_label; ss >> cpu_label;
             int core_id = std::stoi(cpu_label.substr(3));
-            if (core_id >= 512) break;
+            if (core_id >= (int)MAX_CORES) break;
 
             uint64_t u, n, s, id, io, irq, soft;
-            ss >> u >> n >> s >> id >> io >> irq >> soft;
+            if (!(ss >> u >> n >> s >> id >> io >> irq >> soft)) continue;
             
             uint64_t cur_user = u + n;
             uint64_t cur_sys = s + irq + soft;
             
-            double du = (cur_user > last_user_lnx[core_id]) ? (double)(cur_user - last_user_lnx[core_id]) : 0;
-            double ds = (cur_sys > last_sys_lnx[core_id]) ? (double)(cur_sys - last_sys_lnx[core_id]) : 0;
+            double du = (cur_user > last_user_vec[core_id]) ? (double)(cur_user - last_user_vec[core_id]) : 0;
+            double ds = (cur_sys > last_sys_vec[core_id]) ? (double)(cur_sys - last_sys_vec[core_id]) : 0;
+            double dio = (io > last_io_vec[core_id]) ? (double)(io - last_io_vec[core_id]) : 0;
             
-            last_user_lnx[core_id] = cur_user;
-            last_sys_lnx[core_id] = cur_sys;
+            last_user_vec[core_id] = cur_user;
+            last_sys_vec[core_id] = cur_sys;
+            last_io_vec[core_id] = io;
             
-            log_to_db(ts, core_id, du, ds, 0, 0, 0, 0, 0, (double)io);
+            log_to_db(ts, core_id, du, ds, 0, 0, 0, 0, 0, dio);
         }
 
         // Memory (/proc/meminfo)
@@ -345,27 +361,28 @@ private:
             ss >> r >> dummy >> dummy >> dummy >> dummy >> dummy >> dummy >> dummy >> dummy;
             rb += r; ss >> r; tb += r;
         }
-        log_to_db(ts, -2, 0, 0, 0, (long)rb, (long)tb, 0, 0, 0);
+        log_to_db(ts, -2, 0, 0, 0, (long)(rb - last_net_in), (long)(tb - last_net_out), 0, 0, 0);
+        last_net_in = rb; last_net_out = tb;
         #endif
+
+        sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
     }
 
     void log_to_db(double ts, int core, double u, double s, long mem, long ni, long no, long dr, long dw, double wait) {
-        sqlite3_stmt* stmt;
-        const char* sql = "INSERT INTO telemetry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
-        sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, test_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_double(stmt, 2, ts);
-        sqlite3_bind_int(stmt, 3, core);
-        sqlite3_bind_double(stmt, 4, u);
-        sqlite3_bind_double(stmt, 5, s);
-        sqlite3_bind_int64(stmt, 6, mem);
-        sqlite3_bind_int64(stmt, 7, ni);
-        sqlite3_bind_int64(stmt, 8, no);
-        sqlite3_bind_int64(stmt, 9, dr);
-        sqlite3_bind_int64(stmt, 10, dw);
-        sqlite3_bind_double(stmt, 11, wait);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+        if (!insert_stmt) return;
+        sqlite3_reset(insert_stmt);
+        sqlite3_bind_text(insert_stmt, 1, test_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(insert_stmt, 2, ts);
+        sqlite3_bind_int(insert_stmt, 3, core);
+        sqlite3_bind_double(insert_stmt, 4, u);
+        sqlite3_bind_double(insert_stmt, 5, s);
+        sqlite3_bind_int64(insert_stmt, 6, mem);
+        sqlite3_bind_int64(insert_stmt, 7, ni);
+        sqlite3_bind_int64(insert_stmt, 8, no);
+        sqlite3_bind_int64(insert_stmt, 9, dr);
+        sqlite3_bind_int64(insert_stmt, 10, dw);
+        sqlite3_bind_double(insert_stmt, 11, wait);
+        sqlite3_step(insert_stmt);
     }
 };
 
@@ -1760,6 +1777,70 @@ void parallel_download(const Config& cfg, const std::vector<PackageInfo>& info_l
     }
     
     std::cout << std::endl << GREEN << "✔️  Parallel download complete." << RESET << std::endl;
+}
+
+void run_thread_test(const Config& cfg, int num_threads = -1) {
+    int n = (num_threads > 0) ? num_threads : cfg.concurrency;
+    std::cout << MAGENTA << "🧪 Benchmarking Concurrency Orchestration (" << n << " threads)..." << RESET << std::endl;
+    
+    std::string test_id = "bench_threads_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    TelemetryLogger* telemetry = cfg.telemetry ? new TelemetryLogger(cfg, test_id) : nullptr;
+    if (telemetry) {
+        std::cout << YELLOW << "📡 Telemetry active for benchmark..." << RESET << std::endl;
+        telemetry->start();
+    }
+
+    auto start_wall = std::chrono::steady_clock::now();
+    std::vector<std::thread> workers;
+    std::atomic<int> running_count{0};
+    std::atomic<int> total_completed{0};
+
+    for (int i = 0; i < n; ++i) {
+        workers.emplace_back([&, i]() {
+            running_count++;
+            // Busy work to saturate core
+            volatile double sink = 0;
+            for(long j = 0; j < 10000000; ++j) sink += (double)j * j;
+            (void)sink;
+            
+            total_completed++;
+            running_count--;
+        });
+    }
+
+    // Monitor peak utilization
+    bool monitoring = true;
+    int peak_parallel = 0;
+    std::thread monitor([&]() {
+        while(monitoring) {
+            int cur = running_count.load();
+            if (cur > peak_parallel) peak_parallel = cur;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+
+    for (auto& t : workers) t.join();
+    monitoring = false;
+    monitor.join();
+
+    auto end_wall = std::chrono::steady_clock::now();
+    double wall_sec = std::chrono::duration<double>(end_wall - start_wall).count();
+
+    if (telemetry) {
+        telemetry->stop();
+        delete telemetry;
+    }
+
+    std::cout << "\n" << BOLD << GREEN << "🏁 Thread Test Results:" << RESET << std::endl;
+    std::cout << "  - Target Threads:  " << n << std::endl;
+    std::cout << "  - Peak Parallel:   " << BOLD << peak_parallel << RESET << std::endl;
+    std::cout << "  - Total Wall Time: " << std::format("{:.3f}s", wall_sec) << std::endl;
+    
+    if (peak_parallel < n && n <= (int)std::thread::hardware_concurrency()) {
+        std::cout << YELLOW << "⚠️ Warning: OS-level scheduling delay detected (Peak < Target)." << RESET << std::endl;
+    } else if (peak_parallel == n) {
+        std::cout << GREEN << "✔️  Hardware parallelism verified." << RESET << std::endl;
+    }
 }
 
 std::string extract_exception(const std::string& output) {
@@ -3417,6 +3498,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         bool no_cleanup = false;
         int revision_limit = -1;
         bool test_all_revisions = false;
+        bool smoke_test = false;
 
         // Skip 'matrix' (0)
         for (size_t i = 1; i < args.size(); ++i) {
@@ -3427,6 +3509,8 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
                 profile = true;
             } else if (arg == "--telemetry") {
                 telemetry = true;
+            } else if (arg == "--smoke") {
+                smoke_test = true;
             } else if (arg == "--no-cleanup") {
                 no_cleanup = true;
             } else if (arg == "--limit" && i + 1 < args.size()) {
@@ -3454,6 +3538,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
                  m_cfg.concurrency = std::stoi(args[++i]);
              }
         }
+        if (smoke_test) run_thread_test(m_cfg);
         matrix_test(m_cfg, pkg, test_script, python_ver, profile, no_cleanup, revision_limit, test_all_revisions, false);
     }
     else if (command == "compat") {
@@ -3473,10 +3558,12 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         int m_pkg = 1;
         bool profile = false;
         bool telemetry = false;
+        bool smoke_test = false;
         
         for (size_t i = 2; i < args.size(); ++i) {
             if (args[i] == "--profile") profile = true;
             else if (args[i] == "--telemetry") telemetry = true;
+            else if (args[i] == "--smoke") smoke_test = true;
             else if (args[i] == "--py" && i + 1 < args.size()) n_py = std::stoi(args[++i]);
             else if (args[i] == "--pkg" && i + 1 < args.size()) m_pkg = std::stoi(args[++i]);
             else {
@@ -3494,6 +3581,7 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
                  m_cfg.concurrency = std::stoi(args[++i]);
              }
         }
+        if (smoke_test) run_thread_test(m_cfg);
         matrix_test(m_cfg, pkg, "", "auto", profile, false, n_py, false, true, m_pkg);
     }
     else if (command == "profile") {
@@ -3510,6 +3598,21 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         }
         setup_project_env(cfg);
         profile_package(cfg, pkg, ai_review);
+    }
+    else if (command == "bench") {
+        int threads = cfg.concurrency;
+        bool telemetry = false;
+        for (size_t i = 1; i < args.size(); ++i) {
+            if ((args[i] == "--threads" || args[i] == "-j") && i + 1 < args.size()) {
+                threads = std::stoi(args[++i]);
+            } else if (args[i] == "--telemetry") {
+                telemetry = true;
+            }
+        }
+        Config b_cfg = cfg;
+        b_cfg.concurrency = threads;
+        b_cfg.telemetry = telemetry;
+        run_thread_test(b_cfg);
     }
     else if (command == "list") {
         ensure_dirs(cfg);
