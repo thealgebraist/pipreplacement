@@ -17,8 +17,10 @@ public:
     ~TelemetryLogger();
     void start();
     void stop();
+    void log_test_run_status(const std::string& status, const std::string& error_msg);
 private:
     void loop();
     void sample();
     void log_to_db(double ts, int core, double u, double s, long mem, long ni, long no, long dr, long dw, double wait);
+    sqlite3_stmt* status_stmt = nullptr;
 };
