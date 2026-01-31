@@ -2199,7 +2199,9 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
 
                 std::string safe_ver = ver;
                 for(char& c : safe_ver) if(!isalnum(c) && c!='.' && c!='-') c = '_';
-                fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash + "_" + safe_ver);
+                std::string py_suffix = (target_py != "auto" && !target_py.empty()) ? ("_py" + target_py) : "";
+                for(char& c : py_suffix) if(!isalnum(c) && c!='.' && c!='-') c = '_';
+                fs::path matrix_path = cfg.envs_root / ("matrix_" + cfg.project_hash + "_" + safe_ver + py_suffix);
 
                 std::error_code ec;
                 if(fs::exists(matrix_path, ec)) fs::remove_all(matrix_path, ec);
@@ -2569,11 +2571,13 @@ void matrix_test(const Config& cfg, const std::string& pkg, const std::string& c
             std::lock_guard<std::mutex> l(m_res);
             results.push_back(res);
             
-            // Atomically update state file
-            std::lock_guard<std::mutex> ls(m_state);
-            std::ofstream ofs(state_file, std::ios::app);
-            ofs << res.version << "|" << (res.install ? "1" : "0") << "|" << (res.pkg_tests ? "1" : "0") << "|" << (res.custom_test ? "1" : "0") << "|"
-                << res.stats.wall_time_seconds << "|" << res.stats.cpu_time_seconds << "|" << res.stats.peak_memory_kb << "|" << res.stats.disk_delta_bytes << "\n";
+            // Atomically update state file (Skip if worker to avoid multi-process contention)
+            if (cfg.worker_id == "master" || cfg.worker_id.empty()) {
+                std::lock_guard<std::mutex> ls(m_state);
+                std::ofstream ofs(state_file, std::ios::app);
+                ofs << res.version << "|" << (res.install ? "1" : "0") << "|" << (res.pkg_tests ? "1" : "0") << "|" << (res.custom_test ? "1" : "0") << "|"
+                    << res.stats.wall_time_seconds << "|" << res.stats.cpu_time_seconds << "|" << res.stats.peak_memory_kb << "|" << res.stats.disk_delta_bytes << "\n";
+            }
         }
 
         // Thread-local cleanup necessary for parallel unique paths
@@ -3285,7 +3289,14 @@ void init_queue_db(const Config& cfg) {
     sqlite3_close(db);
 }
 
-void run_master(const Config& cfg, const std::string& pkg) {
+void run_master(const Config& cfg, const std::vector<std::string>& args) {
+    if (args.size() < 2) return;
+    std::string pkg = args[1];
+    int limit = -1;
+    for (size_t i = 2; i < args.size(); ++i) {
+        if (args[i] == "--limit" && i + 1 < args.size()) limit = std::stoi(args[++i]);
+    }
+
     setup_project_env(const_cast<Config&>(cfg));
     init_queue_db(cfg);
     std::cout << MAGENTA << "👑 SPIP Master: Populating task queue for " << pkg << "..." << RESET << std::endl;
@@ -3297,9 +3308,9 @@ void run_master(const Config& cfg, const std::string& pkg) {
     sqlite3* db;
     sqlite3_open((cfg.spip_root / "queue.db").c_str(), &db);
     sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
-    
     int count = 0;
     for (const auto& v : versions) {
+        if (limit > 0 && count++ >= limit) break; 
         // For heavy servers, we can populate thousands of combinations
         for (const auto& py : py_versions) {
             std::string sql = std::format("INSERT INTO work_queue (pkg_name, pkg_ver, py_ver, status) "
@@ -3777,8 +3788,8 @@ void run_command(Config& cfg, const std::vector<std::string>& args) {
         }
     }
     else if (command == "master") {
-        if (!require_args(args, 2, "Usage: spip master <pkg>")) return;
-        run_master(cfg, args[1]);
+        if (!require_args(args, 2, "Usage: spip master <pkg> [--limit N]")) return;
+        run_master(cfg, args);
     }
     else if (command == "worker") {
         run_worker(cfg);

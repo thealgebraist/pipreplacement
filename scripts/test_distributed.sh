@@ -11,13 +11,15 @@ DB_PATH="$HOME/.spip/queue.db"
 echo "🧹 Cleaning up previous state..."
 rm -f "$DB_PATH"
 rm -rf "$HOME/.spip/telemetry/"
-rm -rf "$HOME/.spip/envs/"
+if [ -d "$HOME/.spip/envs/" ]; then
+    rm -rf "$HOME/.spip/envs/" || echo "⚠️ Warning: Could not fully clean envs, some folders might be busy."
+fi
 
 echo "🏗️  Building spip..."
 ninja spip
 
-echo "👑 Initializing Master for $PKG..."
-$SPIP master "$PKG"
+echo "👑 Initializing Master for $PKG (limit 5 versions)..."
+$SPIP master "$PKG" --limit 5
 
 # Count pending tasks
 PENDING=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM work_queue WHERE status='PENDING';")
@@ -34,9 +36,9 @@ for i in {1..4}; do
     WORKER_PIDS[$i]=$!
 done
 
-echo "⏳ Waiting for tasks to be processed (30s timeout)..."
+echo "⏳ Waiting for tasks to be processed (120s timeout)..."
 SECONDS=0
-while [ $SECONDS -lt 30 ]; do
+while [ $SECONDS -lt 120 ]; do
     COMPLETED=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM work_queue WHERE status='COMPLETED';")
     FAILED=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM work_queue WHERE status='FAILED';")
     TOTAL=$((COMPLETED + FAILED))
