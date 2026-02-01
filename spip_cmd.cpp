@@ -10,7 +10,13 @@
 void run_command(Config& cfg, const std::vector<std::string>& args) {
     if (args.empty()) { std::cout << "Usage: spip <cmd> [args...]\n" << std::endl; return; }
     std::string cmd = args[0];
-    if (cmd == "bundle") { if (require_args(args, 2, "Usage: spip bundle <folder>")) bundle_package(cfg, args[1]); }
+    if (cmd == "diff") {
+        std::vector<char*> argv_vec;
+        for (size_t i = 1; i < args.size(); i++) {
+            argv_vec.push_back(const_cast<char*>(args[i].c_str()));
+        }
+        cmd_diff(argv_vec.size(), argv_vec.data());
+    } else if (cmd == "bundle") { if (require_args(args, 2, "Usage: spip bundle <folder>")) bundle_package(cfg, args[1]); }
     else if (cmd == "boot") { if (require_args(args, 2, "Usage: spip boot <script.py>")) { setup_project_env(cfg); boot_environment(cfg, args[1]); } }
     else if (cmd == "fetch-db") {
         init_db(); std::ifstream f("all_packages.txt"); if (!f.is_open()) return;
