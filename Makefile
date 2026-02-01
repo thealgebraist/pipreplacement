@@ -23,7 +23,7 @@ OBJS = spip_globals.o spip_utils.o spip_utils_shell.o spip_utils_exec.o \
        spip_top.o spip_top_refs.o \
        spip_cmd.o spip_cmd_install.o spip_cmd_maint.o spip_cmd_matrix.o \
        spip_cmd_top.o spip_cmd_uninstall.o spip_cmd_diff.o \
-       spip_diff.o \
+       spip_diff.o spip_delta_db.o \
        spip_bundle.o spip_bundle_gen.o spip_main.o
 
 all: spip
