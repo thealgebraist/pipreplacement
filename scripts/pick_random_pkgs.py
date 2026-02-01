@@ -3,7 +3,7 @@ import json
 import random
 import sys
 
-def get_random_top_pkgs(count=64):
+def get_random_top_pkgs(count=256):
     url = "https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.json"
     try:
         with urllib.request.urlopen(url, timeout=10) as response:
