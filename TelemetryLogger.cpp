@@ -32,12 +32,7 @@ TelemetryLogger::~TelemetryLogger() {
     if (db) sqlite3_close(db);
 }
 
-    : cfg(c), test_id(id), last_user_vec(MAX_CORES, 0), last_sys_vec(MAX_CORES, 0), last_io_vec(MAX_CORES, 0) 
-{
-    fs::path db_dir = cfg.spip_root / "telemetry";
-    std::error_code ec;
-    if (!fs::exists(db_dir, ec)) fs::create_directories(db_dir, ec);
-    fs::path db_path = db_dir / ("telemetry_" + test_id + ".db");
+
     if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
         std::cerr << "❌ Failed to open telemetry database: " << db_path << std::endl;
         return;
