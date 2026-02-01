@@ -21,6 +21,6 @@ public:
 private:
     void loop();
     void sample();
-    void log_to_db(double ts, int core, double u, double s, long mem, long ni, long no, long dr, long dw, double wait);
+    void log_to_db(double ts, int core, double u, double s, long mem, long ni, long no, long dr, long dw, double wait, int nprocs, int fds);
     sqlite3_stmt* status_stmt = nullptr;
 };

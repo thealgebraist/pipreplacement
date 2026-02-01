@@ -2,6 +2,24 @@
 #ifdef __linux__
 void TelemetryLogger::sample() {
     double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    
+    // Collect process count
+    int num_procs = 0;
+    if (auto dir = opendir("/proc")) {
+        while (auto entry = readdir(dir)) {
+            if (entry->d_name[0] >= '0' && entry->d_name[0] <= '9') num_procs++;
+        }
+        closedir(dir);
+    }
+    
+    // Collect open file descriptor count for current process
+    int open_fds = 0;
+    if (auto dir = opendir("/proc/self/fd")) {
+        while (readdir(dir)) open_fds++;
+        closedir(dir);
+        open_fds -= 3; // Subtract ., .., and the dir fd itself
+    }
+    
     std::ifstream stat("/proc/stat"); std::string line;
     while (std::getline(stat, line) && line.starts_with("cpu")) {
         if (line.starts_with("cpu ")) continue;
@@ -12,7 +30,7 @@ void TelemetryLogger::sample() {
         double ds = (s + irq + soft > last_sys_vec[core_id]) ? (double)(s + irq + soft - last_sys_vec[core_id]) : 0;
         double dio = (io > last_io_vec[core_id]) ? (double)(io - last_io_vec[core_id]) : 0;
         last_user_vec[core_id] = u + n; last_sys_vec[core_id] = s + irq + soft; last_io_vec[core_id] = io;
-        log_to_db(ts, core_id, du, ds, 0, 0, 0, 0, 0, dio);
+        log_to_db(ts, core_id, du, ds, 0, 0, 0, 0, 0, dio, num_procs, open_fds);
     }
     std::ifstream meminfo("/proc/meminfo"); long total = 0, free = 0, cached = 0, buffers = 0;
     while (std::getline(meminfo, line)) {
@@ -21,7 +39,7 @@ void TelemetryLogger::sample() {
         else if (line.starts_with("Cached:")) cached = std::stol(line.substr(10));
         else if (line.starts_with("Buffers:")) buffers = std::stol(line.substr(10));
     }
-    log_to_db(ts, -1, 0, 0, total - free - cached - buffers, 0, 0, 0, 0, 0);
+    log_to_db(ts, -1, 0, 0, total - free - cached - buffers, 0, 0, 0, 0, 0, num_procs, open_fds);
     std::ifstream netdev("/proc/net/dev"); uint64_t rb = 0, tb = 0;
     std::getline(netdev, line); std::getline(netdev, line);
     while (std::getline(netdev, line)) {
@@ -30,7 +48,7 @@ void TelemetryLogger::sample() {
         ss >> r >> dummy >> dummy >> dummy >> dummy >> dummy >> dummy >> dummy >> dummy;
         rb += r; ss >> r; tb += r;
     }
-    log_to_db(ts, -2, 0, 0, 0, (long)(rb - last_net_in), (long)(tb - last_net_out), 0, 0, 0);
+    log_to_db(ts, -2, 0, 0, 0, (long)(rb - last_net_in), (long)(tb - last_net_out), 0, 0, 0, num_procs, open_fds);
     last_net_in = rb; last_net_out = tb;
 }
 #endif

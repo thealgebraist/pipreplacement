@@ -15,12 +15,12 @@ TelemetryLogger::TelemetryLogger(const Config& c, const std::string& id)
     const char* sql = "CREATE TABLE IF NOT EXISTS telemetry ("
                       "test_id TEXT, timestamp REAL, core_id INTEGER, cpu_user REAL, cpu_sys REAL, "
                       "mem_kb INTEGER, net_in INTEGER, net_out INTEGER, disk_read INTEGER, disk_write INTEGER, "
-                      "iowait REAL);";
+                      "iowait REAL, num_procs INTEGER, open_fds INTEGER);";
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
     const char* status_sql = "CREATE TABLE IF NOT EXISTS test_run_status ("
                             "test_id TEXT PRIMARY KEY, status TEXT, error_msg TEXT);";
     sqlite3_exec(db, status_sql, nullptr, nullptr, nullptr);
-    const char* insert_sql = "INSERT INTO telemetry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+    const char* insert_sql = "INSERT INTO telemetry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
     sqlite3_prepare_v2(db, insert_sql, -1, &insert_stmt, nullptr);
     const char* status_insert_sql = "INSERT OR REPLACE INTO test_run_status VALUES (?, ?, ?);";
     sqlite3_prepare_v2(db, status_insert_sql, -1, &status_stmt, nullptr);
