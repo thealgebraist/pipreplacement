@@ -9,14 +9,25 @@ void MatrixTester::run(const std::string& custom_test_script, const std::string&
     std::string test_run_id = pkg + "_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
     std::unique_ptr<TelemetryLogger> tel = cfg.telemetry ? std::make_unique<TelemetryLogger>(cfg, test_run_id) : nullptr;
     if (tel) tel->start();
-    std::map<std::string, PackageInfo> all_needed; std::mutex m_needed; std::vector<std::future<void>> futures;
-    auto task = [&](const std::string& ver) {
-        auto res = vary_python ? (ver.find(':') != std::string::npos ? resolve_only({pkg}, split(ver, ':')[1], split(ver, ':')[0]) : resolve_only({pkg}, "", ver)) : resolve_only({pkg}, ver, python_version);
-        std::lock_guard<std::mutex> l(m_needed); for (const auto& [id, info] : res) all_needed[id] = info;
-    };
-    for (const auto& ver : versions) { if (futures.size() >= (size_t)cfg.concurrency * 2) { for(auto& f : futures) f.wait(); futures.clear(); } futures.push_back(std::async(std::launch::async, task, ver)); }
-    for(auto& f : futures) f.wait();
-    std::vector<PackageInfo> info_list; for (const auto& [id, info] : all_needed) info_list.push_back(info);
-    parallel_download(cfg, info_list);
-    run_execution_phase(custom_test_script, python_version, profile, no_cleanup, revision_limit, test_all_revisions, vary_python, pkg_revision_limit, pinned_pkg_ver);
+    bool test_failed = false;
+    std::string error_msg;
+    try {
+        std::map<std::string, PackageInfo> all_needed; std::mutex m_needed; std::vector<std::future<void>> futures;
+        auto task = [&](const std::string& ver) {
+            auto res = vary_python ? (ver.find(':') != std::string::npos ? resolve_only({pkg}, split(ver, ':')[1], split(ver, ':')[0]) : resolve_only({pkg}, "", ver)) : resolve_only({pkg}, ver, python_version);
+            std::lock_guard<std::mutex> l(m_needed); for (const auto& [id, info] : res) all_needed[id] = info;
+        };
+        for (const auto& ver : versions) { if (futures.size() >= (size_t)cfg.concurrency * 2) { for(auto& f : futures) f.wait(); futures.clear(); } futures.push_back(std::async(std::launch::async, task, ver)); }
+        for(auto& f : futures) f.wait();
+        std::vector<PackageInfo> info_list; for (const auto& [id, info] : all_needed) info_list.push_back(info);
+        parallel_download(cfg, info_list);
+        run_execution_phase(custom_test_script, python_version, profile, no_cleanup, revision_limit, test_all_revisions, vary_python, pkg_revision_limit, pinned_pkg_ver);
+    } catch (const std::exception& e) {
+        test_failed = true;
+        error_msg = e.what();
+    } catch (...) {
+        test_failed = true;
+        error_msg = "Unknown error";
+    }
+    if (tel) tel->log_test_run_status(test_failed ? "failure" : "success", error_msg);
 }

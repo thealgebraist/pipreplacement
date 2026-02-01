@@ -7,6 +7,7 @@ OBJS = spip_globals.o spip_utils.o spip_utils_shell.o spip_utils_exec.o \
        ErrorKnowledgeBase.o ErrorKnowledgeBase_store.o ErrorKnowledgeBase_lookup.o ErrorKnowledgeBase_fixes.o \
        TelemetryLogger.o TelemetryLogger_methods.o TelemetryLogger_loop.o \
        TelemetryLogger_sample_apple.o TelemetryLogger_sample_linux.o TelemetryLogger_log.o \
+       TelemetryLogger_log_status.o \
        spip_env.o spip_env_dirs.o spip_env_git.o spip_env_setup.o spip_env_helpers.o \
        spip_env_cleanup.o spip_env_cleanup_envs.o \
        spip_python.o spip_python_bin.o spip_python_base.o spip_python_req.o \
