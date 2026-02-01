@@ -26,4 +26,3 @@ TelemetryLogger::TelemetryLogger(const Config& c, const std::string& id)
     sqlite3_prepare_v2(db, status_insert_sql, -1, &status_stmt, nullptr);
 }
 
-
