@@ -30,9 +30,6 @@ TelemetryLogger::~TelemetryLogger() {
     if (insert_stmt) sqlite3_finalize(insert_stmt);
     if (status_stmt) sqlite3_finalize(status_stmt);
     if (db) sqlite3_close(db);
-}
-
-
     if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
         std::cerr << "❌ Failed to open telemetry database: " << db_path << std::endl;
         return;
